@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+/* Mobile safe area padding for iOS */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .safe-area-pb {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Hide scrollbar for clean mobile UX */
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Smooth touch scrolling */
+@supports (overflow-x: auto) {
+  .touch-pan-x {
+    touch-action: pan-x;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Animation for better visual feedback on mobile */
+.animate-bounce-subtle {
+  animation: bounceSubtle 2s ease-in-out infinite;
+}
+
+@keyframes bounceSubtle {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+.animate-spin-slow {
+  animation: spin 8s linear infinite;
+}
