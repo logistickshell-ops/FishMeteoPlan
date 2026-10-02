@@ -26,7 +26,8 @@ import {
   PlusCircle,
   Sliders,
   ThermometerSnowflake,
-  Activity
+  Activity,
+  Share2
 } from "lucide-react";
 import {
   locations,
@@ -138,6 +139,7 @@ export default function App() {
   const [spotTackleFilter, setSpotTackleFilter] = useState<string>("all");
   const [spotFishFilter, setSpotFishFilter] = useState<string>("all");
   const [copiedSpotId, setCopiedSpotId] = useState<string | null>(null);
+  const [forecastAction, setForecastAction] = useState<"idle" | "copied" | "shared">("idle");
 
   // Catch Log State
   const [catchLog, setCatchLog] = useState<CatchEntry[]>([]);
@@ -611,7 +613,7 @@ export default function App() {
   const filteredSpots = useMemo(() => {
     return fishingSpots.filter((spot) => {
       // Filter by location
-      const matchLoc = spot.locationId === selectedLocId;
+      const matchLoc = spot.locationId === selectedLocation.id;
       // Filter by tackle type
       const matchTackle = spotTackleFilter === "all" || spot.tackle.toLowerCase().includes(spotTackleFilter.toLowerCase());
       // Filter by fish
@@ -619,7 +621,7 @@ export default function App() {
 
       return matchLoc && matchTackle && matchFish;
     });
-  }, [selectedLocId, spotTackleFilter, spotFishFilter]);
+  }, [selectedLocation.id, spotTackleFilter, spotFishFilter]);
 
   // Handle adding new catch to log
   const handleAddCatch = (e: React.FormEvent) => {
@@ -689,6 +691,41 @@ export default function App() {
     navigator.clipboard.writeText(coords);
     setCopiedSpotId(spotId);
     setTimeout(() => setCopiedSpotId(null), 2000);
+  };
+
+  const forecastShareText = useMemo(() => {
+    const rows = Object.values(biteForecast)
+      .map((item: any) => ({ name: item.fish.name, score: Math.round((item.periods.morning + item.periods.day + item.periods.evening + item.periods.night) / 4) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map((item) => `${item.name}: ${item.score}%`)
+      .join("\n");
+    return `ФишМетеоПлан — прогноз клёва\n${selectedLocation.name} · ${forecastDay === "today" ? "сегодня" : "завтра"}\n\nТоп видов:\n${rows}\n\nПогода: ${activeWeather.temp}°C, ${activeWeather.desc}, ветер ${activeWeather.wind} м/с\n\nПрогноз рекомендательный и не заменяет правила рыболовства.`;
+  }, [biteForecast, selectedLocation.name, forecastDay, activeWeather]);
+
+  const handleCopyForecast = async () => {
+    try {
+      await navigator.clipboard.writeText(forecastShareText);
+      setForecastAction("copied");
+      window.setTimeout(() => setForecastAction("idle"), 2200);
+    } catch (error) {
+      console.warn("Forecast copy failed", error);
+    }
+  };
+
+  const handleShareForecast = async () => {
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "ФишМетеоПлан — прогноз клёва", text: forecastShareText });
+        setForecastAction("shared");
+      } else {
+        await handleCopyForecast();
+        return;
+      }
+      window.setTimeout(() => setForecastAction("idle"), 2200);
+    } catch (error) {
+      if ((error as Error).name !== "AbortError") console.warn("Forecast share failed", error);
+    }
   };
 
   // Ice safety calculations
@@ -991,11 +1028,11 @@ export default function App() {
                 {/* Current + historical + forecast weather timeline */}
                 <div className="rounded-2xl border border-slate-700/80 bg-slate-800 p-4 shadow-lg">
                   <div className="mb-3 flex items-center justify-between">
-                    <div><h3 className="text-sm font-bold text-white">Погода по дням</h3><p className="text-[10px] text-slate-400">Open-Meteo · вчера и прогноз на 7 дней</p></div>
+                    <div><h3 className="text-sm font-bold text-white">Погода по дням</h3><p className="text-[10px] text-slate-400">Open-Meteo · вчера, сегодня и завтра</p></div>
                     <span className={`rounded-full px-2 py-1 text-[10px] font-bold ${apiSuccess ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300"}`}>{apiSuccess ? "онлайн" : "fallback"}</span>
                   </div>
                   <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
-                    {weatherSnapshots.map((item) => { const active = (weatherMode === item.date || weatherMode === item.label); return (
+                    {weatherSnapshots.filter((item) => ["Вчера", "Сегодня", "Завтра"].includes(item.label)).map((item) => { const active = (weatherMode === item.date || weatherMode === item.label); return (
                       <button key={`${item.date}-${item.label}`} onClick={() => { setWeatherMode(item.label); if (item.label === "Сегодня") setForecastDay("today"); if (item.label === "Завтра") setForecastDay("tomorrow"); }} className={`min-w-[92px] rounded-xl border p-2 text-left transition ${active ? "border-cyan-400 bg-cyan-500/15" : "border-slate-700 bg-slate-900/60 hover:border-slate-500"}`}>
                         <div className="text-[10px] font-bold text-cyan-300">{item.label}</div><div className="mt-1 text-sm font-black text-white">{item.minTemp}° / {item.maxTemp}°</div><div className="text-[10px] text-slate-400">{item.precipitation}% осадков</div>
                       </button>
@@ -1568,6 +1605,23 @@ export default function App() {
                     </table>
                   </div>
                 )}
+
+                <div className="rounded-2xl border border-cyan-900/40 bg-cyan-950/20 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Поделиться прогнозом</h3>
+                    <p className="text-[10px] text-slate-400">{selectedLocation.name} · {forecastDay === "today" ? "сегодня" : "завтра"} · топ-3 вида рыбы</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={handleShareForecast} className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-cyan-400 transition cursor-pointer">
+                      <Share2 className="h-3.5 w-3.5" />
+                      {forecastAction === "shared" ? "Готово" : "Поделиться"}
+                    </button>
+                    <button onClick={handleCopyForecast} className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-600 bg-slate-900 px-3 py-2 text-xs font-bold text-slate-200 hover:border-cyan-400 hover:text-white transition cursor-pointer">
+                      <Copy className="h-3.5 w-3.5" />
+                      {forecastAction === "copied" ? "Скопировано" : "Скопировать"}
+                    </button>
+                  </div>
+                </div>
               </div>
             </>
           )}
@@ -1787,10 +1841,9 @@ export default function App() {
           {/* ========================================================= */}
           {activeTab === "spots" && (
             <div className="lg:col-span-12 space-y-6">
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                
-                {/* Left side: Interactive Map canvas & filters */}
-                <div className="lg:col-span-4 space-y-6">
+              <div className="space-y-6">
+                {/* Filters for verified spots */}
+                <div className="rounded-2xl bg-slate-800 p-5 shadow-lg border border-slate-700">
                   {/* Spots Filters */}
                   <div className="rounded-2xl bg-slate-800 p-5 shadow-lg border border-slate-700 space-y-4">
                     <h4 className="text-sm font-bold text-slate-200 border-b border-slate-700/50 pb-3 uppercase tracking-wide flex items-center gap-1.5">
@@ -1832,72 +1885,14 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Base region fishing spots map */}
-                  <div className="rounded-2xl bg-slate-800 p-5 shadow-lg border border-slate-700/80 space-y-3">
-                    <h4 className="text-sm font-bold text-slate-200 uppercase tracking-wide flex items-center gap-1.5">
-                      <MapPin className="h-4 w-4 text-cyan-400" />
-                      Карта базовых мест Ярославской области
-                    </h4>
-                    
-                    {/* SVG Stylized Map */}
-                    <div className="relative aspect-square w-full rounded-xl bg-slate-950 border border-slate-800 overflow-hidden p-2 flex items-center justify-center">
-                      <svg viewBox="0 0 400 400" className="w-full h-full text-blue-900/40">
-                        {/* Background rivers/lakes mockup */}
-                        <path d="M 50,220 Q 150,180 200,200 T 350,120" fill="none" stroke="#00d8f6" strokeWidth="12" opacity="0.3" strokeLinecap="round" />
-                        <path d="M 200,200 Q 220,280 240,380" fill="none" stroke="#00d8f6" strokeWidth="6" opacity="0.2" strokeLinecap="round" />
-                        {/* Rybinskoe Reservoir mockup */}
-                        <path d="M 40,40 Q 120,30 160,80 T 100,160 Z" fill="#00d8f6" opacity="0.15" />
-                        <path d="M 100,100 Q 180,80 220,120 T 180,180 Z" fill="#00d8f6" opacity="0.15" />
-                        {/* Lake Nero */}
-                        <circle cx="280" cy="330" r="14" fill="#00d8f6" opacity="0.15" />
-                        {/* Lake Plescheevo */}
-                        <circle cx="230" cy="360" r="18" fill="#00d8f6" opacity="0.15" />
-
-                        {/* Interactive cities markers */}
-                        {locations.map((loc) => {
-                          // Coordinates translated to SVG spacing
-                          const x = 50 + ((loc.coords.lon - 37) * 45);
-                          const y = 350 - ((loc.coords.lat - 56.5) * 60);
-                          const isSel = loc.id === selectedLocId;
-
-                          return (
-                            <g key={loc.id} className="cursor-pointer group" onClick={() => setSelectedLocId(loc.id)}>
-                              {isSel && (
-                                <circle cx={x} cy={y} r="10" fill="#22d3ee" className="animate-ping opacity-60" />
-                              )}
-                              <circle
-                                cx={x}
-                                cy={y}
-                                r={isSel ? "6" : "4"}
-                                fill={isSel ? "#22d3ee" : "#475569"}
-                                stroke="white"
-                                strokeWidth="1.5"
-                                className="transition-all"
-                              />
-                              <text
-                                x={x}
-                                y={y - 10}
-                                textAnchor="middle"
-                                className={`text-[9px] font-bold ${isSel ? "fill-cyan-300 font-extrabold" : "fill-slate-400"} select-none`}
-                              >
-                                {loc.name}
-                              </text>
-                            </g>
-                          );
-                        })}
-                      </svg>
-                      <div className="absolute bottom-2 right-2 bg-slate-900/90 border border-slate-700/60 p-1.5 rounded text-[8px] text-slate-400 leading-tight">
-                        * Кликните точку на карте,<br />чтобы выбрать район
-                      </div>
-                    </div>
-                  </div>
                 </div>
 
-                {/* Right side: Spots listings */}
-                <div className="lg:col-span-8 space-y-4">
+                {/* Verified spots listings for the selected built-in city */}
+                <div className="space-y-4">
+                  <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-xs text-slate-300">Показываем публичные рыболовные ориентиры из каталога ФишМетеоПлан для выбранного встроенного города. Для города, найденного через поиск, точки появятся после отдельной проверки и добавления в каталог.</div>
                   <div className="flex items-center justify-between">
                     <h3 className="font-montserrat text-lg font-bold text-white flex items-center gap-2">
-                      <span>Места для рыбалки ({filteredSpots.length})</span>
+                      <span>Проверенные места: {selectedLocation.name} ({filteredSpots.length})</span>
                     </h3>
                     <span className="text-xs text-slate-400">
                       Локация: {selectedLocation.name}
@@ -2409,6 +2404,46 @@ export default function App() {
                         ))}
                       </div>
                     </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Feeding, bait and tackle guide */}
+              <div className="rounded-2xl bg-slate-800 p-5 shadow-lg border border-slate-700/80">
+                <div className="flex items-center gap-2 border-b border-slate-700/50 pb-3 mb-4">
+                  <BookOpen className="h-5 w-5 text-cyan-400" />
+                  <div>
+                    <h4 className="font-montserrat text-base font-bold text-white">Прикорм, наживка и снасти</h4>
+                    <p className="text-[10px] text-slate-400">Короткая памятка для выбора тактики по погоде и виду рыбы</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                  <div className="rounded-xl border border-amber-900/40 bg-amber-950/20 p-3">
+                    <h5 className="font-bold text-amber-300 mb-2">Прикорм</h5>
+                    <ul className="space-y-1.5 text-slate-300">
+                      <li>• Мирная рыба: базовая смесь, грунт и мелкая фракция без перекорма.</li>
+                      <li>• Холодная вода: животный компонент — мотыль, опарыш, червь.</li>
+                      <li>• Течение: утяжелите смесь и используйте кормушку, соответствующую силе струи.</li>
+                      <li>• Начните с 3–5 стартовых кормушек и затем докармливайте малыми порциями.</li>
+                    </ul>
+                  </div>
+                  <div className="rounded-xl border border-rose-900/40 bg-rose-950/20 p-3">
+                    <h5 className="font-bold text-rose-300 mb-2">Наживка и приманка</h5>
+                    <ul className="space-y-1.5 text-slate-300">
+                      <li>• Лещ, плотва, карась: опарыш, червь, перловка, кукуруза.</li>
+                      <li>• Щука и судак: живец, джиг, воблер или колеблющаяся блесна.</li>
+                      <li>• Окунь: червь, твистер и небольшие вращающиеся приманки.</li>
+                      <li>• При слабом клёве меняйте размер/подачу, а не только ароматизатор.</li>
+                    </ul>
+                  </div>
+                  <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3">
+                    <h5 className="font-bold text-cyan-300 mb-2">Снасти</h5>
+                    <ul className="space-y-1.5 text-slate-300">
+                      <li>• Фидер — бровки, ямы и течение; подберите вес кормушки под реку.</li>
+                      <li>• Поплавок — тихая вода, камыш и прибрежная растительность.</li>
+                      <li>• Спиннинг — активный поиск хищника у укрытий, перекатов и свалов.</li>
+                      <li>• Зимой проверяйте лёд, используйте жерлицы, мормышки и балансиры по сезону.</li>
+                    </ul>
                   </div>
                 </div>
               </div>
