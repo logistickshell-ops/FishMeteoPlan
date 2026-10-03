@@ -100,12 +100,12 @@ function pressureDelta(weather: EngineWeather) {
   return 0;
 }
 
-function seasonFactor(fish: FishSpecies, month: number, waterTemp: number) {
+function seasonFactor(fish: FishSpecies, month: number, measuredWaterTemp?: number) {
   const season = month >= 3 && month <= 5 ? "spring" : month >= 6 && month <= 8 ? "summer" : month >= 9 && month <= 11 ? "autumn" : "winter";
   let value = 0.55;
   if (["carp", "tench"].includes(fish.id)) value = season === "summer" ? .95 : season === "spring" ? .75 : season === "autumn" ? .60 : .25;
   else if (fish.id === "burbot") value = season === "winter" ? .95 : season === "autumn" ? .80 : .25;
-  else if (fish.id === "catfish") value = season === "summer" && waterTemp > 20 ? .95 : season === "spring" ? .70 : .35;
+  else if (fish.id === "catfish") value = season === "summer" && measuredWaterTemp !== undefined && measuredWaterTemp > 20 ? .95 : season === "spring" ? .70 : .35;
   else if (["pike", "perch"].includes(fish.id)) value = season === "autumn" ? .90 : season === "spring" ? .80 : season === "summer" ? .65 : .45;
   else value = season === "spring" ? .80 : season === "summer" ? .75 : season === "autumn" ? .65 : .40;
   return value;
@@ -168,8 +168,9 @@ export function calculateFishForecast(fish: FishSpecies, weather: EngineWeather,
   const waterLevel = evidence.waterLevel === "measured" ? (context.waterLevelTrend === "rising" ? (predator ? .85 : .78) : context.waterLevelTrend === "falling" ? .35 : .60) : .5;
   const habitat = habitatFactor(fish, context.waterBody);
   const moon = clamp(1 - 2 * Math.abs(context.moonPhase - .5));
-  const season = seasonFactor(fish, context.month, context.waterTemp);
-  const prey = predator ? clamp(.45 + (context.waterTemp > 15 && context.waterTemp < 25 ? .25 : 0) + (weather.wind > 1 && weather.wind < 6 ? .18 : 0) + (weather.rain ? .05 : 0)) : .55;
+  const measuredWaterTemp = evidence.waterTemp === "measured" ? context.waterTemp : undefined;
+  const season = seasonFactor(fish, context.month, measuredWaterTemp);
+  const prey = predator ? clamp(.45 + (measuredWaterTemp !== undefined && measuredWaterTemp > 15 && measuredWaterTemp < 25 ? .25 : 0) + (weather.wind > 1 && weather.wind < 6 ? .18 : 0) + (weather.rain ? .05 : 0)) : .55;
   const factors = { waterTemp, pressure, pressureTrend, wind, light, oxygen, turbidity, waterLevel, habitat, moon, season, prey };
   const weighted = Object.entries(factors).reduce((sum, [key, value]) => sum + weights[key as keyof typeof weights] * clamp(value), 0);
   const seasonMultiplier = .90 + season * .20;
@@ -178,8 +179,10 @@ export function calculateFishForecast(fish: FishSpecies, weather: EngineWeather,
   const heuristicsApplied = buildHeuristics(fish, weather, baseScore);
   const heuristicShift = Math.max(-.12, Math.min(.12, heuristicsApplied.reduce((sum, item) => sum + item.shift, 0)));
   const score = clamp(baseScore + heuristicShift);
-  const completenessFields = [weather.temp, weather.pressure, weather.humidity, weather.wind, weather.cloudiness, context.waterTemp, context.oxygen, context.turbidity, context.waterBody, context.month, context.moonPhase];
-  const dataCompleteness = completenessFields.filter((value) => value !== undefined && value !== null && value !== "").length / completenessFields.length;
+  const weatherFields = [weather.temp, weather.pressure, weather.humidity, weather.wind, weather.cloudiness, context.waterBody, context.month, context.moonPhase];
+  const weatherCompleteness = weatherFields.filter((value) => value !== undefined && value !== null && value !== "").length / weatherFields.length;
+  const evidenceCompleteness = Object.values(evidence).reduce((sum, value) => sum + (value === "measured" ? 1 : value === "modelled" ? .25 : 0), 0) / Object.keys(evidence).length;
+  const dataCompleteness = weatherCompleteness * .65 + evidenceCompleteness * .35;
   const apiResponseQuality = clamp(weather.sourceQuality ?? .85);
   const measured = Object.entries(evidence).filter(([, value]) => value === "measured").map(([key]) => key);
   const modelled = Object.entries(evidence).filter(([, value]) => value === "modelled").map(([key]) => key);
@@ -195,10 +198,10 @@ export function calculateFishForecast(fish: FishSpecies, weather: EngineWeather,
     periods[period] = context.isLegalClosure ? 0 : Math.round(periodScore * 100);
   }
   const finalScore = context.isLegalClosure ? 0 : score;
-  const depthAdvice = context.waterTemp < 8 ? "Прогреваемые мелководья (1–3 м)" : predator && (weather.cloudiness === "Пасмурно" || weather.rain) ? "Косы и бровки (1–3 м)" : predator ? "Бровки и ямы (4–10 м)" : "Средняя глубина (3–5 м)";
+  const depthAdvice = measuredWaterTemp !== undefined && measuredWaterTemp < 8 ? "Прогреваемые мелководья (1–3 м)" : predator && (weather.cloudiness === "Пасмурно" || weather.rain) ? "Косы и бровки (1–3 м)" : predator ? "Бровки и ямы (4–10 м)" : "Средняя глубина (3–5 м)";
   const baitAdvice = `Сезонные: ${fish.seasonalBait[context.month >= 3 && context.month <= 5 ? "spring" : context.month >= 6 && context.month <= 8 ? "summer" : context.month >= 9 && context.month <= 11 ? "autumn" : "winter"].slice(0, 2).join(", ")}`;
-  const colorAdvice = context.turbidity > .6 ? "Яркие и контрастные цвета" : light < .5 ? "Контрастные тёмные тона" : "Естественные цвета";
-  const strategyAdvice = context.waterLevelTrend === "rising" ? "Ищите затопленные участки и обратки" : predator ? "Активный поиск у границ течения и укрытий" : "Тихая ловля с точной подачей прикормки";
+  const colorAdvice = evidence.turbidity === "measured" && context.turbidity > .6 ? "Яркие и контрастные цвета" : light < .5 ? "Контрастные тёмные тона" : "Естественные цвета; мутность не измерена";
+  const strategyAdvice = evidence.waterLevel === "measured" && context.waterLevelTrend === "rising" ? "Ищите затопленные участки и обратки" : predator ? "Активный поиск у границ течения и укрытий" : "Тихая ловля с точной подачей прикормки; уровень не измерен";
   const reasoning = context.isLegalClosure ? context.legalNotice : `Индекс условий: вода ${evidence.waterTemp === "measured" ? Math.round(waterTemp * 100) + "% (измерение)" : "нейтрально (нет измерения)"}, давление ${Math.round(pressure * 100)}%, тренд ${Math.round(pressureTrend * 100)}%, ветер ${Math.round(wind * 100)}%. Покрытие входов: ${Math.round(dataCompleteness * 100)}%; статистическая калибровка отсутствует.`;
   return {
     score: finalScore,

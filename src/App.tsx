@@ -42,6 +42,8 @@ import {
 } from "./data/fishingData";
 import { getFishingSpotsForCity } from "./data/fishingSpots";
 import { getRegionalBeacon } from "./data/regionalBeacons";
+import { fetchHydrologySnapshot, HydrologySnapshot } from "./services/hydrology";
+import { findNearbyWaterObjects, searchWaterObjects, WaterObject } from "./services/waterSearch";
 import { useTelegram } from "./hooks/useTelegram";
 import { algorithmLegalNotice, calculateFishForecast } from "./algorithm/forecastEngine";
 
@@ -65,10 +67,13 @@ const EMPTY_LOCATION: LocationType = {
   avgDepth: "—",
 };
 
+export const hpaToMmhg = (hpa: number) => Math.round(hpa * 0.750061683);
+
 // Type definitions
 interface WeatherState {
   temp: number;
   pressure: number;
+  pressureHpa?: number;
   pressureTrend: "stable" | "falling" | "rising";
   humidity: number;
   wind: number;
@@ -136,6 +141,12 @@ export default function App() {
   const [realWeather, setRealWeather] = useState<WeatherState | null>(null);
   const [weatherSnapshots, setWeatherSnapshots] = useState<WeatherSnapshot[]>([]);
   const [weatherMode, setWeatherMode] = useState<string>("Сейчас");
+  const [hydrology, setHydrology] = useState<HydrologySnapshot | null>(null);
+  const [waterObjects, setWaterObjects] = useState<WaterObject[]>([]);
+  const [selectedWaterObject, setSelectedWaterObject] = useState<WaterObject | null>(null);
+  const [waterSearch, setWaterSearch] = useState("");
+  const [isWaterSearching, setIsWaterSearching] = useState(false);
+  const [waterSearchError, setWaterSearchError] = useState<string | null>(null);
   const [sandboxWeather, setSandboxWeather] = useState<WeatherState>({
     temp: 18,
     pressure: 755,
@@ -191,6 +202,7 @@ export default function App() {
     try {
       const savedTheme = localStorage.getItem(`${storagePrefix}:theme`);
       const savedCity = localStorage.getItem(`${storagePrefix}:city`);
+      const savedWater = localStorage.getItem(`${storagePrefix}:water-object`);
       const savedCatchLog = localStorage.getItem(`${storagePrefix}:catch-log`);
       if (savedTheme === "light" || savedTheme === "dark") setTheme(savedTheme);
       if (savedCity) {
@@ -202,6 +214,8 @@ export default function App() {
         setSavedLocation(null);
         setCitySearch("");
       }
+      if (savedWater) setSelectedWaterObject(JSON.parse(savedWater));
+      else setSelectedWaterObject(null);
       if (savedCatchLog) {
         setCatchLog(JSON.parse(savedCatchLog));
       } else {
@@ -223,6 +237,12 @@ export default function App() {
     if (!profileHydrated) return;
     localStorage.setItem(`${storagePrefix}:city`, JSON.stringify({ location: savedLocation }));
   }, [profileHydrated, storagePrefix, savedLocation]);
+
+  useEffect(() => {
+    if (!profileHydrated) return;
+    if (selectedWaterObject) localStorage.setItem(`${storagePrefix}:water-object`, JSON.stringify(selectedWaterObject));
+    else localStorage.removeItem(`${storagePrefix}:water-object`);
+  }, [profileHydrated, storagePrefix, selectedWaterObject]);
 
   useEffect(() => {
     if (!profileHydrated) return;
@@ -262,12 +282,14 @@ export default function App() {
         const current = data.current;
         const currentCode = Number(current.weather_code ?? 0);
         const currentDesc = describe(currentCode);
-        const currentPressure = Math.round(Number(current.pressure_msl) * 0.750062);
+        const currentPressureHpa = Number(current.pressure_msl);
+        const currentPressure = hpaToMmhg(currentPressureHpa);
         const currentHourIndex = (data.hourly?.time || []).findIndex((time: string) => time.startsWith(String(current.time).slice(0, 13)));
         const pressureDelta3h = currentHourIndex >= 3 ? Number(current.pressure_msl) - Number(data.hourly.pressure_msl[currentHourIndex - 3]) : 0;
         const currentState: WeatherState = {
           temp: Math.round(Number(current.temperature_2m)),
           pressure: currentPressure,
+          pressureHpa: Number(currentPressureHpa.toFixed(1)),
           pressureTrend: "stable",
           humidity: Math.round(Number(current.relative_humidity_2m)),
           wind: Number(Number(current.wind_speed_10m || 0).toFixed(1)),
@@ -285,6 +307,14 @@ export default function App() {
           sourceQuality: 1,
           forecastDate: String(current.time || new Date().toISOString()).slice(0, 10),
         };
+        const hourlyTimes: string[] = data.hourly?.time || [];
+        const hourlyPressures: number[] = data.hourly?.pressure_msl || [];
+        const pressureForDate = (date: string) => {
+          const index = hourlyTimes.findIndex((time) => time.startsWith(`${date}T12`));
+          const hpa = index >= 0 && Number.isFinite(hourlyPressures[index]) ? Number(hourlyPressures[index]) : currentPressureHpa;
+          const delta = index >= 3 && Number.isFinite(hourlyPressures[index - 3]) ? hpa - Number(hourlyPressures[index - 3]) : 0;
+          return { hpa, mmhg: hpaToMmhg(hpa), delta };
+        };
         const daily = data.daily;
         const snapshots: WeatherSnapshot[] = [{
           ...currentState,
@@ -298,10 +328,14 @@ export default function App() {
           const code = Number(daily.weather_code?.[index] ?? 0);
           const info = describe(code);
           const dayTemp = Math.round((Number(daily.temperature_2m_max?.[index]) + Number(daily.temperature_2m_min?.[index])) / 2);
+          const dayPressure = pressureForDate(date);
           const dayState: WeatherState = {
             ...currentState,
             temp: dayTemp,
-            pressure: currentPressure,
+            pressure: dayPressure.mmhg,
+            pressureHpa: Number(dayPressure.hpa.toFixed(1)),
+            pressureDelta3h: dayPressure.delta,
+            pressureTrend: dayPressure.delta > 0.5 ? "rising" : dayPressure.delta < -0.5 ? "falling" : "stable",
             desc: info.desc,
             icon: info.icon,
             rain: info.rain,
@@ -341,6 +375,72 @@ export default function App() {
     fetchWeather();
     return () => { cancelled = true; };
   }, [savedLocation]);
+
+  // Open-Meteo Flood/GloFAS: modelled river discharge only; no water proxy is
+  // promoted to a measurement without a dated station observation.
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchHydrology() {
+      if (!savedLocation) {
+        setHydrology(null);
+        return;
+      }
+      const waterLocation = selectedWaterObject || { coords: savedLocation.coords, type: savedLocation.type };
+      const snapshot = await fetchHydrologySnapshot({
+        lat: waterLocation.coords.lat,
+        lon: waterLocation.coords.lon,
+        type: waterLocation.type,
+      });
+      if (!cancelled) setHydrology(snapshot);
+    }
+    void fetchHydrology();
+    return () => { cancelled = true; };
+  }, [savedLocation, selectedWaterObject]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadNearbyWater() {
+      if (!savedLocation) {
+        setWaterObjects([]);
+        setWaterSearchError(null);
+        return;
+      }
+      setIsWaterSearching(true);
+      setWaterSearchError(null);
+      try {
+        const objects = await findNearbyWaterObjects(savedLocation.coords, 15000);
+        if (!cancelled) setWaterObjects(objects);
+      } catch (error) {
+        if (!cancelled) {
+          setWaterSearchError("Не удалось загрузить ближайшие водные объекты. Можно повторить поиск по названию.");
+          setWaterObjects([]);
+        }
+      } finally {
+        if (!cancelled) setIsWaterSearching(false);
+      }
+    }
+    void loadNearbyWater();
+    return () => { cancelled = true; };
+  }, [savedLocation]);
+
+  useEffect(() => {
+    const query = waterSearch.trim();
+    if (query.length < 3 || !savedLocation) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setIsWaterSearching(true);
+      setWaterSearchError(null);
+      try {
+        const objects = await searchWaterObjects(query, savedLocation.coords);
+        if (!controller.signal.aborted) setWaterObjects(objects);
+      } catch (error) {
+        if (!controller.signal.aborted) setWaterSearchError("Поиск реки временно недоступен.");
+      } finally {
+        if (!controller.signal.aborted) setIsWaterSearching(false);
+      }
+    }, 450);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [waterSearch, savedLocation]);
 
   // Open-Meteo Geocoding API powers city search without a server or API key.
   useEffect(() => {
@@ -727,7 +827,7 @@ export default function App() {
       .map((item: any) => ({ name: item.fish.name, score: Math.round((item.periods.morning + item.periods.day + item.periods.evening + item.periods.night) / 4) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 3)
-      .map((item) => `${item.name}: индекс ${item.score}/100`)
+      .map((item) => `${item.name}: индекс ${item.score}%`)
       .join("\n");
     return `ФишМетеоПлан — прогноз клёва\n${selectedLocation.name} · ${forecastDay === "today" ? "сегодня" : "завтра"}\n\nТоп видов:\n${rows}\n\nПогода: ${activeWeather.temp}°C, ${activeWeather.desc}, ветер ${activeWeather.wind} м/с\n\nПрогноз рекомендательный и не заменяет правила рыболовства.`;
   }, [biteForecast, selectedLocation.name, forecastDay, activeWeather]);
@@ -888,7 +988,7 @@ export default function App() {
                 {cityResults.map((city) => (
                   <button key={`${city.id}-${city.latitude}`} onClick={() => {
                     setSavedLocation({ id: `city-${city.id}`, name: city.name, nameGenitive: `в ${city.name}`, coords: { lat: city.latitude, lon: city.longitude }, description: `${city.country || ""}${city.admin1 ? `, ${city.admin1}` : ""}. Погода Open-Meteo.`, type: "river", avgDepth: "—" });
-                    setCitySearch(city.name); setCityResults([]); setWeatherMode("Сейчас");
+                    setCitySearch(city.name); setCityResults([]); setWeatherMode("Сейчас"); setSelectedWaterObject(null); setWaterSearch("");
                   }} className="block w-full px-3 py-2 text-left text-xs text-slate-200 hover:bg-cyan-500/20">
                     <span className="font-bold">{city.name}</span><span className="ml-2 text-slate-500">{city.admin1 || city.country || ""}</span>
                   </button>
@@ -899,6 +999,42 @@ export default function App() {
 
           <div className="text-xs text-slate-400 md:max-w-[210px]">Введите город и выберите результат поиска. Приложение всегда использует сохранённый город пользователя.</div>
         </section>
+
+        {hasLocation && (
+          <section className="mb-6 rounded-2xl border border-cyan-500/25 bg-gradient-to-r from-cyan-950/55 via-slate-900 to-blue-950/50 p-4 shadow-lg">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex items-start gap-3">
+                <div className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-2.5 text-cyan-300"><Waves className="h-5 w-5" /></div>
+                <div>
+                  <h3 className="text-sm font-black uppercase tracking-wide text-white">Водный объект для прогноза</h3>
+                  <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-300">Выберите реку, озеро или водохранилище рядом с городом. Гидрологические данные запрашиваются для выбранной точки, а не для условного центра города.</p>
+                </div>
+              </div>
+              <div className="relative w-full lg:max-w-sm">
+                <div className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-950/70 px-3 py-2.5">
+                  <Search className="h-4 w-4 text-cyan-400" />
+                  <input value={waterSearch} onChange={(e) => setWaterSearch(e.target.value)} placeholder="Найти реку или озеро" className="w-full bg-transparent text-sm text-white outline-none placeholder:text-slate-500" />
+                  {isWaterSearching && <span className="text-[10px] text-slate-500">поиск…</span>}
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+              {waterObjects.slice(0, 12).map((water) => {
+                const active = selectedWaterObject?.id === water.id;
+                return <button key={water.id} onClick={() => setSelectedWaterObject(water)} className={`min-w-[190px] rounded-xl border p-3 text-left transition ${active ? "border-cyan-300 bg-cyan-500/15 shadow-md shadow-cyan-500/10" : "border-slate-700 bg-slate-950/50 hover:border-cyan-500/50"}`}>
+                  <div className="flex items-center justify-between gap-2"><span className="truncate text-xs font-black text-white">{water.name}</span><span className="shrink-0 text-[9px] font-bold uppercase text-cyan-300">{water.type === "river" ? "река" : water.type === "lake" ? "озеро" : "вдхр."}</span></div>
+                  <div className="mt-1 text-[10px] text-slate-400">{water.distanceKm.toFixed(1)} км · {water.source}</div>
+                </button>;
+              })}
+              {!isWaterSearching && waterObjects.length === 0 && <div className="rounded-xl border border-dashed border-slate-700 px-3 py-2 text-xs text-slate-400">Объекты не найдены — попробуйте название реки.</div>}
+            </div>
+            {waterSearchError && <p className="mt-2 text-[10px] text-amber-300">{waterSearchError}</p>}
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] text-slate-400">
+              <span>Выбрано:</span><strong className="text-cyan-300">{selectedWaterObject?.name || "городская точка, водоём не выбран"}</strong>
+              {selectedWaterObject && <button onClick={() => setSelectedWaterObject(null)} className="text-slate-500 underline hover:text-white">сбросить</button>}
+            </div>
+          </section>
+        )}
 
         {!hasLocation && (
           <section className="mb-6 rounded-2xl border border-dashed border-cyan-500/40 bg-cyan-950/20 p-8 text-center">
@@ -1029,6 +1165,7 @@ export default function App() {
                     <div>
                       <span className="text-[10px] text-slate-400 block mb-0.5">Давление</span>
                       <strong className="text-xs text-white">{activeWeather.pressure} мм</strong>
+                      <span className="block text-[9px] text-slate-500">{activeWeather.pressureHpa ?? "—"} гПа</span>
                     </div>
                     <div>
                       <span className="text-[10px] text-slate-400 block mb-0.5">Влажность</span>
@@ -1252,29 +1389,38 @@ export default function App() {
                 <div className="rounded-2xl bg-slate-800 p-5 shadow-lg border border-slate-700/80">
                   <h3 className="text-sm font-bold text-slate-200 border-b border-slate-700/50 pb-3 mb-4 flex items-center gap-2 uppercase tracking-wide">
                     <Waves className="h-4 w-4 text-cyan-400" />
-                    Состояние гидрорежима
+                    Водные ресурсы · {selectedWaterObject?.name || selectedLocation.name}
                   </h3>
                   <div className="space-y-2.5 text-xs text-slate-300">
                     <div className="flex justify-between">
-                      <span>Прозрачность воды:</span>
-                      <strong className={activeWeather.wind > 5 ? "text-amber-400" : "text-emerald-400"}>
-                        {activeWeather.wind > 5 ? "Мутная (волнение)" : "Высокая (отличная)"}
-                      </strong>
+                      <span>Температура воды:</span>
+                      <strong className="text-amber-300">Нет измерения</strong>
                     </div>
                     <div className="flex justify-between">
-                      <span>Волновое волнение:</span>
-                      <strong className={activeWeather.wind > 4 ? "text-amber-400" : "text-emerald-400"}>
-                        {activeWeather.wind > 4 ? "Прибойное, есть волна" : "Штиль / слабое"}
-                      </strong>
+                      <span>Растворённый кислород:</span>
+                      <strong className="text-amber-300">Нет измерения</strong>
                     </div>
                     <div className="flex justify-between">
-                      <span>Термоклин (слой):</span>
-                      <strong className={activeWeather.temp > 22 ? "text-amber-400" : "text-slate-400"}>
-                        {activeWeather.temp > 22 ? "Вероятен на глубине" : "Отсутствует"}
+                      <span>Прозрачность / мутность:</span>
+                      <strong className="text-amber-300">Нет измерения</strong>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Речной расход:</span>
+                      <strong className={hydrology?.dischargeM3s !== null && hydrology?.dischargeM3s !== undefined ? "text-cyan-300" : "text-amber-300"}>
+                        {hydrology?.dischargeM3s !== null && hydrology?.dischargeM3s !== undefined ? `${hydrology.dischargeM3s.toFixed(1)} м³/с · модель` : "Нет данных"}
                       </strong>
                     </div>
                     <div className="pt-2 border-t border-slate-700/50 text-[10px] text-slate-400">
-                      * Рассчитывается на основе текущей температуры воздуха, интенсивности ветра и испарения.
+                      {hydrology?.note || "Гидрологические показатели ещё не загружены."}
+                      {hydrology?.dischargeDate && <span className="block mt-1">Дата расхода: {hydrology.dischargeDate}</span>}
+                      <span className="block mt-1">Ветер и волнение показываются отдельно по погодной модели; они не являются измерением прозрачности воды.</span>
+                    </div>
+                    <div className="pt-3 border-t border-slate-700/50">
+                      <div className="mb-2 flex items-center justify-between"><span className="text-[10px] font-bold uppercase tracking-wide text-cyan-300">Прогноз речного расхода</span><span className="text-[9px] text-slate-500">GloFAS · модель</span></div>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {(hydrology?.dischargeForecast || []).map((item) => <div key={item.date} className="rounded-lg bg-slate-900/60 p-2 text-center"><div className="text-[9px] text-slate-500">{item.date.slice(5)}</div><strong className="text-[11px] text-cyan-200">{item.value.toFixed(0)}</strong><div className="text-[8px] text-slate-500">м³/с</div></div>)}
+                        {(!hydrology || hydrology.dischargeForecast.length === 0) && <div className="col-span-4 rounded-lg border border-dashed border-slate-700 p-2 text-[10px] text-slate-500">Прогноз расхода недоступен или выбранное озеро не имеет сопоставимого речного расхода.</div>}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1406,7 +1552,7 @@ export default function App() {
                               {/* Avg score circle */}
                               <div className="text-center">
                                 <div className={`flex h-12 w-12 items-center justify-center rounded-xl font-black text-sm tracking-tight shadow-md ${badge.bg}`}>
-                                  {avgScore}/100
+                                  {avgScore}%
                                 </div>
                                 <span className="text-[9px] text-slate-400 block mt-1 uppercase font-bold">{badge.emoji} {badge.label}</span>
                               </div>
@@ -1417,25 +1563,25 @@ export default function App() {
                               <div>
                                 <span className="text-[9px] text-slate-400 block">Утро</span>
                                 <strong className={`text-xs block mt-0.5 ${getBiteBadgeDetails(periods.morning).textColor}`}>
-                                  {periods.morning}/100
+                                  {periods.morning}%
                                 </strong>
                               </div>
                               <div>
                                 <span className="text-[9px] text-slate-400 block">День</span>
                                 <strong className={`text-xs block mt-0.5 ${getBiteBadgeDetails(periods.day).textColor}`}>
-                                  {periods.day}/100
+                                  {periods.day}%
                                 </strong>
                               </div>
                               <div>
                                 <span className="text-[9px] text-slate-400 block">Вечер</span>
                                 <strong className={`text-xs block mt-0.5 ${getBiteBadgeDetails(periods.evening).textColor}`}>
-                                  {periods.evening}/100
+                                  {periods.evening}%
                                 </strong>
                               </div>
                               <div>
                                 <span className="text-[9px] text-slate-400 block">Ночь</span>
                                 <strong className={`text-xs block mt-0.5 ${getBiteBadgeDetails(periods.night).textColor}`}>
-                                  {periods.night}/100
+                                  {periods.night}%
                                 </strong>
                               </div>
                             </div>
@@ -1467,7 +1613,7 @@ export default function App() {
                                       recommendations.comfortIndex >= 70 ? "text-emerald-400" :
                                       recommendations.comfortIndex >= 40 ? "text-amber-400" : "text-rose-400"
                                     }`}>
-                                      {recommendations.comfortIndex}/100
+                                      {recommendations.comfortIndex}%
                                     </strong>
                                   </div>
                                   <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
@@ -1592,22 +1738,22 @@ export default function App() {
                                 </td>
                                 <td className="p-3 text-center">
                                   <div className={`mx-auto flex h-9 w-12 items-center justify-center rounded-lg font-bold text-xs ${getBiteBadgeDetails(periods.morning).bg}`}>
-                                    {periods.morning}/100
+                                    {periods.morning}%
                                   </div>
                                 </td>
                                 <td className="p-3 text-center">
                                   <div className={`mx-auto flex h-9 w-12 items-center justify-center rounded-lg font-bold text-xs ${getBiteBadgeDetails(periods.day).bg}`}>
-                                    {periods.day}/100
+                                    {periods.day}%
                                   </div>
                                 </td>
                                 <td className="p-3 text-center">
                                   <div className={`mx-auto flex h-9 w-12 items-center justify-center rounded-lg font-bold text-xs ${getBiteBadgeDetails(periods.evening).bg}`}>
-                                    {periods.evening}/100
+                                    {periods.evening}%
                                   </div>
                                 </td>
                                 <td className="p-3 text-center">
                                   <div className={`mx-auto flex h-9 w-12 items-center justify-center rounded-lg font-bold text-xs ${getBiteBadgeDetails(periods.night).bg}`}>
-                                    {periods.night}/100
+                                    {periods.night}%
                                   </div>
                                 </td>
                                 <td className="p-3">

@@ -9,7 +9,10 @@
     "preview": "vite preview",
     "check:algorithm": "node scripts/check-algorithm.mjs",
     "check:fishing-data": "node scripts/check-fishing-data.mjs",
-    "check:regional-beacons": "node scripts/check-regional-beacons.mjs"
+    "check:regional-beacons": "node scripts/check-regional-beacons.mjs",
+    "check:hydrology": "node scripts/check-hydrology.mjs",
+    "check:pressure": "node scripts/check-pressure.mjs",
+    "check:water-search": "node scripts/check-water-search.mjs"
   },
   "dependencies": {
     "clsx": "2.1.1",
