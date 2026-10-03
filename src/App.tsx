@@ -30,17 +30,34 @@ import {
   Share2
 } from "lucide-react";
 import {
-  locations,
   fishSpecies,
-  fishingSpots,
   spawningRules,
   fishingKnots,
   weatherChecklists,
   FishSpecies as FishType
 } from "./data/fishingData";
-import { waterBodies } from "./data/waterData";
 import { useTelegram } from "./hooks/useTelegram";
 import { algorithmLegalNotice, calculateFishForecast } from "./algorithm/forecastEngine";
+
+interface LocationType {
+  id: string;
+  name: string;
+  nameGenitive: string;
+  coords: { lat: number; lon: number };
+  description: string;
+  type: "river" | "lake" | "reservoir";
+  avgDepth: string;
+}
+
+const EMPTY_LOCATION: LocationType = {
+  id: "",
+  name: "",
+  nameGenitive: "",
+  coords: { lat: 0, lon: 0 },
+  description: "",
+  type: "river",
+  avgDepth: "—",
+};
 
 // Type definitions
 interface WeatherState {
@@ -97,14 +114,12 @@ export default function App() {
   const handleTabChange = (tab: string) => { hapticSelection(); setActiveTab(tab); };
 
   // Core Location State
-  const [selectedLocId, setSelectedLocId] = useState<string>("yaroslavl");
-  const [customLocation, setCustomLocation] = useState<typeof locations[number] | null>(null);
+  const [savedLocation, setSavedLocation] = useState<LocationType | null>(null);
   const [citySearch, setCitySearch] = useState<string>("");
   const [cityResults, setCityResults] = useState<Array<{ id: number; name: string; latitude: number; longitude: number; country?: string; admin1?: string }>>([]);
   const [isCitySearching, setIsCitySearching] = useState<boolean>(false);
-  const selectedLocation = useMemo(() => {
-    return customLocation || locations.find((l) => l.id === selectedLocId) || locations[0];
-  }, [customLocation, selectedLocId]);
+  const selectedLocation = savedLocation || EMPTY_LOCATION;
+  const hasLocation = Boolean(savedLocation);
 
   // Sandbox Mode State
   const [sandboxMode, setSandboxMode] = useState<boolean>(false);
@@ -153,7 +168,7 @@ export default function App() {
     species: "Лещ",
     weight: 1.2,
     length: 35,
-    location: "Стрелка реки Волги и Которосль",
+    location: "Место по GPS/описанию",
     bait: "Червь + Опарыш",
     date: new Date().toISOString().split("T")[0],
     notes: "Поклёвка уверенная, ловил на бровке.",
@@ -174,25 +189,17 @@ export default function App() {
       if (savedTheme === "light" || savedTheme === "dark") setTheme(savedTheme);
       if (savedCity) {
         const city = JSON.parse(savedCity);
-        if (city.customLocation) setCustomLocation(city.customLocation);
-        if (city.selectedLocId) setSelectedLocId(city.selectedLocId);
-        setCitySearch(city.customLocation?.name || locations.find((item) => item.id === city.selectedLocId)?.name || "");
+        const storedLocation = city.location ?? city.customLocation ?? null;
+        setSavedLocation(storedLocation);
+        setCitySearch(storedLocation?.name || "");
       } else {
-        setSelectedLocId("yaroslavl");
-        setCustomLocation(null);
-        setCitySearch("Ярославль");
+        setSavedLocation(null);
+        setCitySearch("");
       }
       if (savedCatchLog) {
         setCatchLog(JSON.parse(savedCatchLog));
       } else {
-        const legacyStorageKey = "yarrybak_catch_log_v2";
-        const legacy = localStorage.getItem(legacyStorageKey);
-        const initialLogs: CatchEntry[] = legacy ? JSON.parse(legacy) : [
-          { id: "1", species: "Щука", weight: 4.8, length: 82, location: "Спасский монастырь — оз. Неро", bait: "Спининг (блесна-колебалка Mepps Syclops)", date: "2025-10-14", notes: "Взяла на плавной проводке у самой кромки тростника. Сумасшедшая свечка при вываживании! Погода была пасмурная с моросящим дождиком.", weatherDetails: "Пасмурно, 12°C, ветер ЮЗ 3 м/с" },
-          { id: "2", species: "Лещ", weight: 2.1, length: 46, location: "Стрелка реки Волги и Которосль", bait: "Фидер (бутерброд опарыш + кукуруза)", date: "2025-08-02", notes: "Поклёвка уверенная в 5:30 утра. Дистанция 42 метра, ракушечник на бровке. Кормил пшенкой со жмыхом и чесночным ароматизатором.", weatherDetails: "Ясно, 22°C, ветер Ю 1 м/с" },
-          { id: "3", species: "Окунь", weight: 0.72, length: 31, location: "Брейтовская коса (Сить)", bait: "Спиннинг (виброхвост Keitech 2\" на отводном)", date: "2025-09-18", notes: "Стайный окунь. Клевал на каждой проводке в течение получаса на вечерней зорьке. Плавный скат с песчаного полива.", weatherDetails: "Облачно с прояснениями, 15°C, ветер З 4 м/с" }
-        ];
-        setCatchLog(initialLogs);
+        setCatchLog([]);
       }
     } catch (error) {
       console.warn("Не удалось загрузить профиль пользователя", error);
@@ -208,8 +215,8 @@ export default function App() {
 
   useEffect(() => {
     if (!profileHydrated) return;
-    localStorage.setItem(`${storagePrefix}:city`, JSON.stringify({ selectedLocId, customLocation }));
-  }, [profileHydrated, storagePrefix, selectedLocId, customLocation]);
+    localStorage.setItem(`${storagePrefix}:city`, JSON.stringify({ location: savedLocation }));
+  }, [profileHydrated, storagePrefix, savedLocation]);
 
   useEffect(() => {
     if (!profileHydrated) return;
@@ -220,7 +227,18 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     async function fetchWeather() {
+      if (!savedLocation) {
+        setIsApiLoading(false);
+        setApiSuccess(false);
+        setRealWeather(null);
+        setWeatherSnapshots([]);
+        return;
+      }
       setIsApiLoading(true);
+      setApiSuccess(false);
+      setRealWeather(null);
+      setWeatherSnapshots([]);
+      setWeatherMode("Сейчас");
       try {
         const url = `https://api.open-meteo.com/v1/forecast?latitude=${selectedLocation.coords.lat}&longitude=${selectedLocation.coords.lon}&current=temperature_2m,relative_humidity_2m,weather_code,pressure_msl,wind_speed_10m,wind_direction_10m,cloud_cover,dew_point_2m,uv_index&hourly=pressure_msl&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&past_days=1&forecast_days=7&wind_speed_unit=ms&timezone=auto`;
         const response = await fetch(url);
@@ -316,12 +334,12 @@ export default function App() {
     }
     fetchWeather();
     return () => { cancelled = true; };
-  }, [selectedLocation]);
+  }, [savedLocation]);
 
   // Open-Meteo Geocoding API powers city search without a server or API key.
   useEffect(() => {
     const query = citySearch.trim();
-    if (query.length < 2) { setCityResults([]); return; }
+    if (query.length < 2 || (savedLocation && query === savedLocation.name)) { setCityResults([]); return; }
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
       setIsCitySearching(true);
@@ -334,7 +352,7 @@ export default function App() {
       } finally { setIsCitySearching(false); }
     }, 300);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [citySearch]);
+  }, [citySearch, savedLocation]);
 
   // Catch log writes are scoped by the Telegram user ID/profile above.
   const saveCatches = (logs: CatchEntry[]) => {
@@ -408,7 +426,7 @@ export default function App() {
 
   // Select the weather period that drives the fishing calculation.
   const selectedSnapshot = useMemo(() => weatherSnapshots.find((item) => item.label === weatherMode) || weatherSnapshots.find((item) => item.date === weatherMode), [weatherSnapshots, weatherMode]);
-  const activeWeather = sandboxMode ? sandboxWeather : (selectedSnapshot || realWeather || getSeasonalFallback(selectedLocId));
+  const activeWeather = sandboxMode ? sandboxWeather : (selectedSnapshot || realWeather || getSeasonalFallback(selectedLocation.id));
 
   // Calculates Moon Phase from active date
   const moonInfo = useMemo(() => {
@@ -612,19 +630,18 @@ export default function App() {
     });
   }, [fishSearch, fishFilter]);
 
-  // Filtered Spots
-  const filteredSpots = useMemo(() => {
-    return fishingSpots.filter((spot) => {
-      // Filter by location
-      const matchLoc = spot.locationId === selectedLocation.id;
-      // Filter by tackle type
-      const matchTackle = spotTackleFilter === "all" || spot.tackle.toLowerCase().includes(spotTackleFilter.toLowerCase());
-      // Filter by fish
-      const matchFish = spotFishFilter === "all" || spot.fish.includes(spotFishFilter);
-
-      return matchLoc && matchTackle && matchFish;
-    });
-  }, [selectedLocation.id, spotTackleFilter, spotFishFilter]);
+  // The verified-place view is intentionally empty until a searched city has a dedicated catalogue entry.
+  const filteredSpots: Array<{
+    id: string;
+    name: string;
+    locationId: string;
+    coords: string;
+    depth: string;
+    bottom: string;
+    fish: string[];
+    tackle: string;
+    tips: string;
+  }> = [];
 
   // Handle adding new catch to log
   const handleAddCatch = (e: React.FormEvent) => {
@@ -811,7 +828,7 @@ export default function App() {
                 <div className="rounded-lg bg-slate-800 px-3 py-1 text-xs text-slate-300 flex items-center gap-2 border border-slate-700">
                   <span className={`inline-block h-2 w-2 rounded-full ${isApiLoading ? "bg-amber-400 animate-ping" : apiSuccess ? "bg-emerald-400" : "bg-sky-400"}`} />
                   <span>
-                    {isApiLoading ? "Синхронизация..." : apiSuccess ? "Open-Meteo в сети" : "Сезонный расчёт"}
+                    {isApiLoading ? "Синхронизация..." : apiSuccess ? "Open-Meteo в сети" : hasLocation ? "Сезонный расчёт" : "Ожидание города"}
                   </span>
                 </div>
                 <div className="text-right">
@@ -819,7 +836,7 @@ export default function App() {
                     {new Date().toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" })}
                   </p>
                   <p className="text-[10px] text-slate-400">
-                    Гео: {selectedLocation.name}
+                    Гео: {hasLocation ? selectedLocation.name : "город не выбран"}
                   </p>
                 </div>
                 <button
@@ -849,10 +866,10 @@ export default function App() {
             </div>
             <div>
               <h2 className="font-montserrat text-base font-bold text-white flex items-center gap-2">
-                Выбран водоем: <span className="text-cyan-300">{selectedLocation.name}</span>
+                Выбранный город: <span className="text-cyan-300">{hasLocation ? selectedLocation.name : "не выбран"}</span>
               </h2>
               <p className="text-xs text-slate-300 mt-0.5 line-clamp-1">
-                {selectedLocation.description}
+                {hasLocation ? selectedLocation.description : "Найдите город через поиск, чтобы получить погодный прогноз и расчёт клёва."}
               </p>
             </div>
           </div>
@@ -868,7 +885,7 @@ export default function App() {
               <div className="absolute z-30 mt-1 w-full overflow-hidden rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
                 {cityResults.map((city) => (
                   <button key={`${city.id}-${city.latitude}`} onClick={() => {
-                    setCustomLocation({ id: `city-${city.id}`, name: city.name, nameGenitive: `в ${city.name}`, coords: { lat: city.latitude, lon: city.longitude }, description: `${city.country || ""}${city.admin1 ? `, ${city.admin1}` : ""}. Погода Open-Meteo.`, type: "river", avgDepth: "—" });
+                    setSavedLocation({ id: `city-${city.id}`, name: city.name, nameGenitive: `в ${city.name}`, coords: { lat: city.latitude, lon: city.longitude }, description: `${city.country || ""}${city.admin1 ? `, ${city.admin1}` : ""}. Погода Open-Meteo.`, type: "river", avgDepth: "—" });
                     setCitySearch(city.name); setCityResults([]); setWeatherMode("Сейчас");
                   }} className="block w-full px-3 py-2 text-left text-xs text-slate-200 hover:bg-cyan-500/20">
                     <span className="font-bold">{city.name}</span><span className="ml-2 text-slate-500">{city.admin1 || city.country || ""}</span>
@@ -878,32 +895,19 @@ export default function App() {
             )}
           </div>
 
-          {/* Quick Select Buttons */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs text-slate-400 mr-1 hidden lg:inline">Район:</span>
-            {locations.map((loc) => (
-              <button
-                key={loc.id}
-                onClick={() => {
-                  setSelectedLocId(loc.id);
-                  setCustomLocation(null);
-                  setCitySearch(loc.name);
-                  setWeatherMode("Сейчас");
-                }}
-                className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition-all cursor-pointer ${
-                  selectedLocId === loc.id
-                    ? "bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20 font-bold"
-                    : "bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700/60"
-                }`}
-              >
-                {loc.name}
-              </button>
-            ))}
-          </div>
+          <div className="text-xs text-slate-400 md:max-w-[210px]">Введите город и выберите результат поиска. Приложение всегда использует сохранённый город пользователя.</div>
         </section>
 
+        {!hasLocation && (
+          <section className="mb-6 rounded-2xl border border-dashed border-cyan-500/40 bg-cyan-950/20 p-8 text-center">
+            <Search className="mx-auto mb-3 h-10 w-10 text-cyan-400" />
+            <h2 className="text-lg font-bold text-white">Найдите город для прогноза</h2>
+            <p className="mt-2 text-sm text-slate-300">Выберите город в результатах поиска. После выбора он сохранится в вашем профиле и будет использоваться при следующем запуске.</p>
+          </section>
+        )}
+
         {/* Tab Selector - Visible only on large screens, mobile uses Bottom Navigation */}
-        <div className="mb-6 hidden lg:flex overflow-x-auto rounded-xl bg-slate-800 p-1 border border-slate-700 scrollbar-none">
+        <div style={!hasLocation ? { display: "none" } : undefined} className="mb-6 hidden lg:flex overflow-x-auto rounded-xl bg-slate-800 p-1 border border-slate-700 scrollbar-none">
           <button
             onClick={() => handleTabChange("forecast")}
             className={`flex flex-1 items-center justify-center gap-2 rounded-lg py-2.5 px-4 text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
@@ -959,7 +963,7 @@ export default function App() {
         </div>
 
         {/* Tab Content Display */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        <div className={`${!hasLocation ? "hidden" : ""} grid grid-cols-1 gap-6 lg:grid-cols-12`}>
           
           {/* ========================================================= */}
           {/* TAB 1: FORECAST PANEL */}
@@ -1064,7 +1068,7 @@ export default function App() {
                       </h4>
                       <button
                         onClick={() => {
-                          setSandboxWeather(realWeather || getSeasonalFallback(selectedLocId));
+                          setSandboxWeather(realWeather || getSeasonalFallback(selectedLocation.id));
                         }}
                         className="text-[10px] text-slate-400 hover:text-white underline cursor-pointer"
                       >
@@ -1902,37 +1906,7 @@ export default function App() {
 
                 {/* Verified spots listings for the selected built-in city */}
                 <div className="space-y-4">
-                  <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-xs text-slate-300">Показываем публичные рыболовные ориентиры из каталога ФишМетеоПлан для выбранного встроенного города. Для города, найденного через поиск, точки появятся после отдельной проверки и добавления в каталог.</div>
-                  <div className="rounded-2xl bg-slate-800 p-5 shadow-lg border border-slate-700/80 space-y-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <h3 className="font-montserrat text-lg font-bold text-white">Водоёмы для рыбалки</h3>
-                        <p className="text-[10px] text-slate-400">Реки, озёра, пруды и водохранилища рядом с {selectedLocation.name}</p>
-                      </div>
-                      <Waves className="h-5 w-5 text-cyan-400" />
-                    </div>
-                    {waterBodies.filter((water) => water.locationId === selectedLocation.id).length > 0 ? (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {waterBodies.filter((water) => water.locationId === selectedLocation.id).map((water) => (
-                          <article key={water.id} className="rounded-xl border border-slate-700 bg-slate-900/50 p-3 space-y-2">
-                            <div className="flex items-start justify-between gap-2">
-                              <h4 className="font-bold text-white text-sm">{water.name}</h4>
-                              <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[9px] font-bold text-cyan-300">{water.type}</span>
-                            </div>
-                            <p className="text-[10px] text-slate-400">{water.relation}</p>
-                            <p className="text-xs text-slate-300 leading-relaxed"><strong className="text-cyan-300">Рыбалка:</strong> {water.fishingNotes}</p>
-                            <p className="text-[10px] text-amber-200/80 leading-relaxed"><strong>Доступ:</strong> {water.accessNotes}</p>
-                            <div className="flex flex-wrap gap-2 pt-1">
-                              {water.sources.slice(0, 2).map((source) => <a key={source} href={source} target="_blank" rel="noreferrer" className="text-[9px] text-cyan-400 underline hover:text-white">Источник</a>)}
-                            </div>
-                          </article>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="rounded-xl border border-dashed border-slate-700 p-4 text-xs text-slate-400">Для города, найденного через поиск, база водоёмов пока не заполнена.</p>
-                    )}
-                    <p className="text-[10px] text-slate-500">Карточка подтверждает существование и публичное описание водоёма, но не разрешение на ловлю. Перед поездкой проверьте актуальные правила, нерестовые ограничения и доступ.</p>
-                  </div>
+                  <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-xs text-slate-300">Каталог проверенных мест подключается отдельно для выбранного города после проверки источников.</div>
                   <div className="flex items-center justify-between">
                     <h3 className="font-montserrat text-lg font-bold text-white flex items-center gap-2">
                       <span>Проверенные места: {selectedLocation.name} ({filteredSpots.length})</span>
@@ -2145,7 +2119,7 @@ export default function App() {
                         onChange={(e) => setNewCatch({ ...newCatch, location: e.target.value })}
                         className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs sm:text-sm text-slate-100 focus:outline-none focus:border-cyan-500 cursor-pointer"
                       >
-                        {fishingSpots.map((spot) => (
+                        {filteredSpots.map((spot) => (
                           <option key={spot.id} value={spot.name}>
                             {spot.name}
                           </option>
@@ -2609,7 +2583,7 @@ export default function App() {
       </main>
 
       {/* Mobile Bottom Navigation Bar */}
-      <nav className="fixed bottom-0 left-0 right-0 z-50 lg:hidden bg-slate-900/95 backdrop-blur-md border-t border-slate-800 safe-area-pb">
+      <nav style={!hasLocation ? { display: "none" } : undefined} className="fixed bottom-0 left-0 right-0 z-50 lg:hidden bg-slate-900/95 backdrop-blur-md border-t border-slate-800 safe-area-pb">
         <div className="flex items-center justify-around px-2 py-2">
           {[
             { id: "forecast", label: "Прогноз", icon: Activity },
