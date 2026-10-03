@@ -34,8 +34,14 @@ import {
   spawningRules,
   fishingKnots,
   weatherChecklists,
-  FishSpecies as FishType
+  tackleGuide,
+  fishingAdvice,
+  FishSpecies as FishType,
+  getActiveSpawningRestrictions,
+  isSpawningRestrictionActive
 } from "./data/fishingData";
+import { getFishingSpotsForCity } from "./data/fishingSpots";
+import { getRegionalBeacon } from "./data/regionalBeacons";
 import { useTelegram } from "./hooks/useTelegram";
 import { algorithmLegalNotice, calculateFishForecast } from "./algorithm/forecastEngine";
 
@@ -500,6 +506,7 @@ export default function App() {
   }, [activeWeather]);
 
   // ===== NORMALIZED, TRACEABLE BITE FORECAST ENGINE =====
+  const regionalBeacon = useMemo(() => getRegionalBeacon(selectedLocation.name), [selectedLocation.name]);
   const biteForecast = useMemo(() => {
     const weather = {
       temp: activeWeather.temp,
@@ -531,8 +538,15 @@ export default function App() {
         waterTemp,
         waterLevelTrend,
         turbidity,
-        oxygen,
-        waterBody: selectedLocation.type,
+          oxygen,
+          waterBody: selectedLocation.type,
+          waterEvidence: {
+            waterTemp: "modelled",
+            oxygen: "modelled",
+            turbidity: "modelled",
+            waterLevel: "modelled",
+          },
+          regionalBeaconId: regionalBeacon?.id,
         latitude: selectedLocation.coords.lat,
         longitude: selectedLocation.coords.lon,
         month,
@@ -553,7 +567,6 @@ export default function App() {
           habitat: engine.factors.habitat,
           precip: activeWeather.rain ? (fish.type === "predator" ? 60 : 35) : 50,
           oxygen: engine.factors.oxygen,
-          magnetic: 50,
           turbidity: engine.factors.turbidity,
           waterLevel: engine.factors.waterLevel,
           visibility: engine.factors.light,
@@ -564,11 +577,13 @@ export default function App() {
         confidenceBreakdown: engine.confidenceBreakdown,
         heuristicsApplied: engine.heuristicsApplied,
         reasoning: engine.reasoning,
-        legalNotice: engine.legalNotice,
+          legalNotice: engine.legalNotice,
+          inputCoverage: engine.inputCoverage,
+          regionalBeacon,
       };
     });
     return result;
-  }, [activeWeather, apiSuccess, moonInfo, waterTemp, selectedLocation]);
+  }, [activeWeather, apiSuccess, moonInfo, waterTemp, selectedLocation, regionalBeacon]);
 
   // Weather state visual badge colors helper
   const getBiteBadgeDetails = (score: number) => {
@@ -630,18 +645,12 @@ export default function App() {
     });
   }, [fishSearch, fishFilter]);
 
-  // The verified-place view is intentionally empty until a searched city has a dedicated catalogue entry.
-  const filteredSpots: Array<{
-    id: string;
-    name: string;
-    locationId: string;
-    coords: string;
-    depth: string;
-    bottom: string;
-    fish: string[];
-    tackle: string;
-    tips: string;
-  }> = [];
+  const citySpots = useMemo(() => getFishingSpotsForCity(selectedLocation.name), [selectedLocation.name]);
+  const filteredSpots = useMemo(() => citySpots.filter((spot) => {
+    const tackleMatch = spotTackleFilter === "all" || spot.tackle.toLowerCase().includes(spotTackleFilter.toLowerCase());
+    const fishMatch = spotFishFilter === "all" || spot.fish.some((fish) => fish.toLowerCase() === spotFishFilter.toLowerCase());
+    return tackleMatch && fishMatch;
+  }), [citySpots, spotTackleFilter, spotFishFilter]);
 
   // Handle adding new catch to log
   const handleAddCatch = (e: React.FormEvent) => {
@@ -718,7 +727,7 @@ export default function App() {
       .map((item: any) => ({ name: item.fish.name, score: Math.round((item.periods.morning + item.periods.day + item.periods.evening + item.periods.night) / 4) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 3)
-      .map((item) => `${item.name}: ${item.score}%`)
+      .map((item) => `${item.name}: индекс ${item.score}/100`)
       .join("\n");
     return `ФишМетеоПлан — прогноз клёва\n${selectedLocation.name} · ${forecastDay === "today" ? "сегодня" : "завтра"}\n\nТоп видов:\n${rows}\n\nПогода: ${activeWeather.temp}°C, ${activeWeather.desc}, ветер ${activeWeather.wind} м/с\n\nПрогноз рекомендательный и не заменяет правила рыболовства.`;
   }, [biteForecast, selectedLocation.name, forecastDay, activeWeather]);
@@ -778,15 +787,8 @@ export default function App() {
     return { rating, alertColor, detail, effectiveThickness };
   }, [iceThickness, iceQuality]);
 
-  // Check spawning ban alert active (Current month is April or May)
-  const isSpawningBanActive = useMemo(() => {
-    const month = new Date().getMonth() + 1; // 1-12
-    const day = new Date().getDate();
-    if (month === 5) return true;
-    if (month === 4 && day >= 15) return true;
-    if (month === 6 && day <= 1) return true;
-    return false;
-  }, []);
+  const isSpawningBanActive = isSpawningRestrictionActive(new Date());
+  const activeSpawningRestrictions = getActiveSpawningRestrictions(new Date());
 
   return (
     <div className={`${theme === "light" ? "theme-light" : "theme-dark"} min-h-screen bg-slate-900 font-sans text-slate-100 antialiased selection:bg-cyan-500 selection:text-white`}>
@@ -1365,7 +1367,7 @@ export default function App() {
                         if (fishFilter === "peaceful") return !isPred;
                         return true;
                       })
-                      .map(({ fish, periods, factors, recommendations, confidence, confidenceBreakdown, reasoning, heuristicsApplied, legalNotice }) => {
+                      .map(({ fish, periods, factors, recommendations, confidence, confidenceBreakdown, reasoning, heuristicsApplied, legalNotice, inputCoverage, regionalBeacon }) => {
                         // Average score of the fish for the day
                         const avgScore = Math.round(
                           (periods.morning + periods.day + periods.evening + periods.night) / 4
@@ -1404,7 +1406,7 @@ export default function App() {
                               {/* Avg score circle */}
                               <div className="text-center">
                                 <div className={`flex h-12 w-12 items-center justify-center rounded-xl font-black text-sm tracking-tight shadow-md ${badge.bg}`}>
-                                  {avgScore}%
+                                  {avgScore}/100
                                 </div>
                                 <span className="text-[9px] text-slate-400 block mt-1 uppercase font-bold">{badge.emoji} {badge.label}</span>
                               </div>
@@ -1415,25 +1417,25 @@ export default function App() {
                               <div>
                                 <span className="text-[9px] text-slate-400 block">Утро</span>
                                 <strong className={`text-xs block mt-0.5 ${getBiteBadgeDetails(periods.morning).textColor}`}>
-                                  {periods.morning}%
+                                  {periods.morning}/100
                                 </strong>
                               </div>
                               <div>
                                 <span className="text-[9px] text-slate-400 block">День</span>
                                 <strong className={`text-xs block mt-0.5 ${getBiteBadgeDetails(periods.day).textColor}`}>
-                                  {periods.day}%
+                                  {periods.day}/100
                                 </strong>
                               </div>
                               <div>
                                 <span className="text-[9px] text-slate-400 block">Вечер</span>
                                 <strong className={`text-xs block mt-0.5 ${getBiteBadgeDetails(periods.evening).textColor}`}>
-                                  {periods.evening}%
+                                  {periods.evening}/100
                                 </strong>
                               </div>
                               <div>
                                 <span className="text-[9px] text-slate-400 block">Ночь</span>
                                 <strong className={`text-xs block mt-0.5 ${getBiteBadgeDetails(periods.night).textColor}`}>
-                                  {periods.night}%
+                                  {periods.night}/100
                                 </strong>
                               </div>
                             </div>
@@ -1460,12 +1462,12 @@ export default function App() {
                                 {/* Comfort Index Bar */}
                                 <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-700/50">
                                   <div className="flex items-center justify-between mb-2">
-                                    <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wide">Индекс комфорта клёва</span>
+                                    <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wide">Индекс условий (не вероятность)</span>
                                     <strong className={`text-sm font-black ${
                                       recommendations.comfortIndex >= 70 ? "text-emerald-400" :
                                       recommendations.comfortIndex >= 40 ? "text-amber-400" : "text-rose-400"
                                     }`}>
-                                      {recommendations.comfortIndex}%
+                                      {recommendations.comfortIndex}/100
                                     </strong>
                                   </div>
                                   <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
@@ -1474,7 +1476,7 @@ export default function App() {
                                         recommendations.comfortIndex >= 70 ? "bg-emerald-500" :
                                         recommendations.comfortIndex >= 40 ? "bg-amber-500" : "bg-rose-500"
                                       }`}
-                                      style={{ width: `${recommendations.comfortIndex}%` }}
+                                      style={{ width: `${recommendations.comfortIndex}/100` }}
                                     />
                                   </div>
                                 </div>
@@ -1482,7 +1484,7 @@ export default function App() {
                                 {/* Confidence and traceable reasoning */}
                                 <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 space-y-2">
                                   <div className="flex items-center justify-between">
-                                    <span className="text-[10px] font-bold uppercase tracking-wide text-cyan-300">Доверие к расчёту</span>
+                                    <span className="text-[10px] font-bold uppercase tracking-wide text-cyan-300">Покрытие и качество входов</span>
                                     <strong className="text-sm font-black text-white">{Math.round((confidence ?? 0) * 100)}%</strong>
                                   </div>
                                   <div className="grid grid-cols-2 gap-1.5 text-[10px] text-slate-300 sm:grid-cols-4">
@@ -1492,6 +1494,9 @@ export default function App() {
                                     <span>API: {Math.round((confidenceBreakdown?.apiResponseQuality ?? 0) * 100)}%</span>
                                   </div>
                                   <p className="text-[10px] leading-relaxed text-slate-300">{reasoning}</p>
+                                  <p className="text-[10px] leading-relaxed text-amber-200">Индекс условий, а не вероятность улова: регионального калиброванного датасета пока нет. Расчётные вода, кислород, мутность и уровень не являются измерениями.</p>
+                                  {regionalBeacon && <p className="text-[10px] leading-relaxed text-cyan-200">Региональный маяк: {regionalBeacon.title}. Неизвестные параметры не подменяются погодой.</p>}
+                                  {inputCoverage?.missing?.length > 0 && <p className="text-[10px] text-rose-200">Нет данных: {inputCoverage.missing.join(", ")}</p>}
                                   {heuristicsApplied?.length > 0 && <p className="text-[10px] text-amber-300">Эвристики: {heuristicsApplied.map((item: { name: string; shift: number }) => `${item.name} (${item.shift > 0 ? "+" : ""}${item.shift.toFixed(2)})`).join(", ")}</p>}
                                   {legalNotice && <p className="text-[10px] text-amber-200">{legalNotice}</p>}
                                 </div>
@@ -1533,7 +1538,6 @@ export default function App() {
                                       { label: "Кислород", value: factors.oxygen, icon: "🫧" },
                                       { label: "Мутность", value: factors.turbidity, icon: "🌫️" },
                                       { label: "Уровень воды", value: factors.waterLevel, icon: "📈" },
-                                      { label: "Магнитные бури", value: factors.magnetic, icon: "🧲" },
                                       { label: "Актив. корма", value: factors.preyActivity, icon: "🐟" },
                                     ].map((f) => (
                                       <div key={f.label} className="flex justify-between items-center bg-slate-800/40 p-1.5 rounded">
@@ -1588,22 +1592,22 @@ export default function App() {
                                 </td>
                                 <td className="p-3 text-center">
                                   <div className={`mx-auto flex h-9 w-12 items-center justify-center rounded-lg font-bold text-xs ${getBiteBadgeDetails(periods.morning).bg}`}>
-                                    {periods.morning}%
+                                    {periods.morning}/100
                                   </div>
                                 </td>
                                 <td className="p-3 text-center">
                                   <div className={`mx-auto flex h-9 w-12 items-center justify-center rounded-lg font-bold text-xs ${getBiteBadgeDetails(periods.day).bg}`}>
-                                    {periods.day}%
+                                    {periods.day}/100
                                   </div>
                                 </td>
                                 <td className="p-3 text-center">
                                   <div className={`mx-auto flex h-9 w-12 items-center justify-center rounded-lg font-bold text-xs ${getBiteBadgeDetails(periods.evening).bg}`}>
-                                    {periods.evening}%
+                                    {periods.evening}/100
                                   </div>
                                 </td>
                                 <td className="p-3 text-center">
                                   <div className={`mx-auto flex h-9 w-12 items-center justify-center rounded-lg font-bold text-xs ${getBiteBadgeDetails(periods.night).bg}`}>
-                                    {periods.night}%
+                                    {periods.night}/100
                                   </div>
                                 </td>
                                 <td className="p-3">
@@ -1904,9 +1908,9 @@ export default function App() {
 
                 </div>
 
-                {/* Verified spots listings for the selected built-in city */}
+                {/* Verified spots listings for the selected searched city */}
                 <div className="space-y-4">
-                  <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-xs text-slate-300">Каталог проверенных мест подключается отдельно для выбранного города после проверки источников.</div>
+                  <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-xs text-slate-300">Публичная база мест для выбранного города. Доступ, сезонные запреты и состояние подъезда проверяйте перед выездом.</div>
                   <div className="flex items-center justify-between">
                     <h3 className="font-montserrat text-lg font-bold text-white flex items-center gap-2">
                       <span>Проверенные места: {selectedLocation.name} ({filteredSpots.length})</span>
@@ -1919,7 +1923,7 @@ export default function App() {
                   {filteredSpots.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-slate-700 p-12 text-center text-slate-400 space-y-3">
                       <Anchor className="h-10 w-10 mx-auto text-slate-500 animate-pulse" />
-                      <p className="text-sm">По вашему запросу мест в этом районе не найдено.</p>
+                      <p className="text-sm">{citySpots.length === 0 ? `Для города ${selectedLocation.name} пока нет проверенной карточки в базе.` : "По выбранным фильтрам мест не найдено."}</p>
                       <button
                         onClick={() => {
                           setSpotTackleFilter("all");
@@ -1944,13 +1948,13 @@ export default function App() {
                               </h4>
                               {/* Copy coords */}
                               <button
-                                onClick={() => handleCopyCoords(spot.coords, spot.id)}
+                                onClick={() => handleCopyCoords(`${spot.water} — ${spot.name}`, spot.id)}
                                 className={`p-1.5 rounded-lg border text-xs flex items-center gap-1 transition-all cursor-pointer ${
                                   copiedSpotId === spot.id
                                     ? "bg-emerald-500 text-slate-950 border-emerald-400"
                                     : "bg-slate-900 text-slate-400 border-slate-750 hover:bg-slate-750"
                                 }`}
-                                title="Скопировать GPS координаты"
+                                title="Скопировать название водоёма"
                               >
                                 {copiedSpotId === spot.id ? (
                                   <>
@@ -1960,24 +1964,27 @@ export default function App() {
                                 ) : (
                                   <>
                                     <Copy className="h-3.5 w-3.5" />
-                                    <span className="text-[10px]">Коорд.</span>
+                                    <span className="text-[10px]">Водоём</span>
                                   </>
                                 )}
                               </button>
                             </div>
 
                             <p className="text-xs text-slate-300 leading-relaxed italic">
-                              {spot.tips}
+                              {spot.note}
+                            </p>
+                            <p className="text-[11px] leading-relaxed text-amber-200/80">
+                              <strong className="text-amber-300">Доступ:</strong> {spot.access}
                             </p>
 
                             <div className="grid grid-cols-2 gap-2 text-[10px] sm:text-xs">
                               <div className="bg-slate-900/50 p-2 rounded-lg border border-slate-750">
-                                <span className="text-slate-400 block mb-0.5">Глубина:</span>
-                                <strong className="text-slate-200">{spot.depth}</strong>
+                                <span className="text-slate-400 block mb-0.5">Тип:</span>
+                                <strong className="text-slate-200">{spot.type}</strong>
                               </div>
                               <div className="bg-slate-900/50 p-2 rounded-lg border border-slate-750">
-                                <span className="text-slate-400 block mb-0.5">Характер дна:</span>
-                                <strong className="text-slate-200 capitalize">{spot.bottom}</strong>
+                                <span className="text-slate-400 block mb-0.5">Водоём:</span>
+                                <strong className="text-slate-200">{spot.water}</strong>
                               </div>
                             </div>
 
@@ -2272,15 +2279,15 @@ export default function App() {
                   </div>
                   <div className="space-y-2">
                     <h4 className="font-montserrat text-lg font-bold text-white flex items-center gap-2">
-                      Нерестовые ограничения: базовая памятка Ярославской области
+                      Нерестовые ограничения и сезонные правила
                     </h4>
                     <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
                       Каждый добросовестный рыбак обязан соблюдать природоохранное законодательство. 
-                      Период ограничений: <strong className="text-rose-400 bg-rose-500/10 px-2 py-0.5 rounded font-black">{spawningRules.dates}</strong>.
+                      {isSpawningBanActive ? <>Сейчас действует контрольный период: <strong className="text-rose-400 bg-rose-500/10 px-2 py-0.5 rounded font-black">{spawningRules.dates}</strong>. Показаны только актуальные ограничения для этого периода.</> : <>Сейчас активных ограничений из календаря проекта нет. Перед выездом всё равно сверяйте официальный документ для выбранного региона.</>}
                     </p>
                     
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
-                      {spawningRules.restrictions.map((rule, idx) => (
+                      {activeSpawningRestrictions.map((rule, idx) => (
                         <div key={idx} className="flex gap-2.5 bg-slate-900/40 p-3 rounded-xl border border-slate-750 text-xs">
                           <ChevronRight className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
                           <p className="text-slate-300 leading-relaxed">{rule}</p>
@@ -2462,6 +2469,50 @@ export default function App() {
                       <li>• Зимой проверяйте лёд, используйте жерлицы, мормышки и балансиры по сезону.</li>
                     </ul>
                   </div>
+                </div>
+              </div>
+
+              {/* Full tackle directory */}
+              <div className="rounded-2xl bg-slate-800 p-5 shadow-lg border border-slate-700/80">
+                <div className="flex items-center gap-2 border-b border-slate-700/50 pb-3 mb-4">
+                  <Anchor className="h-5 w-5 text-cyan-400" />
+                  <div>
+                    <h4 className="font-montserrat text-base font-bold text-white">Все основные снасти</h4>
+                    <p className="text-[10px] text-slate-400">Выбор по виду рыбы, типу водоёма и сезону</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {tackleGuide.map((tackle) => (
+                    <article key={tackle.name} className="rounded-xl border border-slate-700 bg-slate-900/50 p-3 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <h5 className="font-bold text-white text-sm">{tackle.name}</h5>
+                        <span className="text-[10px] rounded-full border border-cyan-800/50 bg-cyan-950/40 px-2 py-0.5 text-cyan-300">{tackle.category}</span>
+                      </div>
+                      <p className="text-xs text-slate-300"><strong className="text-slate-100">Рыба:</strong> {tackle.forFish}</p>
+                      <p className="text-xs text-slate-400"><strong className="text-slate-300">Где:</strong> {tackle.where}</p>
+                      <p className="text-xs text-slate-400"><strong className="text-slate-300">Оснастка:</strong> {tackle.setup}</p>
+                      <p className="text-xs leading-relaxed text-amber-200/90"><strong className="text-amber-300">Совет:</strong> {tackle.tips}</p>
+                    </article>
+                  ))}
+                </div>
+              </div>
+
+              {/* Practical fishing advice */}
+              <div className="rounded-2xl border border-emerald-900/50 bg-emerald-950/20 p-5 shadow-lg">
+                <div className="flex items-center gap-2 border-b border-emerald-800/50 pb-3 mb-4">
+                  <CheckCircle2 className="h-5 w-5 text-emerald-400" />
+                  <div>
+                    <h4 className="font-montserrat text-base font-bold text-white">Советы перед выездом</h4>
+                    <p className="text-[10px] text-slate-400">Практические подсказки без обещаний гарантированного улова</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {fishingAdvice.map((advice, idx) => (
+                    <div key={idx} className="flex gap-2 text-xs leading-relaxed text-slate-300">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-900/60 text-emerald-300 font-bold">{idx + 1}</span>
+                      <p>{advice}</p>
+                    </div>
+                  ))}
                 </div>
               </div>
 

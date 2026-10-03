@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check:algorithm": "node scripts/check-algorithm.mjs"
+    "check:algorithm": "node scripts/check-algorithm.mjs",
+    "check:fishing-data": "node scripts/check-fishing-data.mjs",
+    "check:regional-beacons": "node scripts/check-regional-beacons.mjs"
   },
   "dependencies": {
     "clsx": "2.1.1",

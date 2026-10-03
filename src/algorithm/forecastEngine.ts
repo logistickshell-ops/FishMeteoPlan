@@ -25,6 +25,13 @@ export interface EngineContext {
   turbidity: number;
   oxygen: number;
   waterBody: "river" | "lake" | "reservoir";
+  waterEvidence?: {
+    waterTemp: "measured" | "modelled" | "missing";
+    oxygen: "measured" | "modelled" | "missing";
+    turbidity: "measured" | "modelled" | "missing";
+    waterLevel: "measured" | "modelled" | "missing";
+  };
+  regionalBeaconId?: string;
   latitude: number;
   longitude: number;
   month: number;
@@ -57,6 +64,11 @@ export interface EngineResult {
   confidenceBreakdown: ConfidenceBreakdown;
   reasoning: string;
   legalNotice: string;
+  inputCoverage: {
+    measured: string[];
+    modelled: string[];
+    missing: string[];
+  };
   recommendations: {
     comfortIndex: number;
     depthAdvice: string;
@@ -147,12 +159,13 @@ export function calculateFishForecast(fish: FishSpecies, weather: EngineWeather,
   const trendStability = clamp(1 - Math.abs(delta) / 3);
   const pressure = rangeComfort(weather.pressure, fish.pressure[0], fish.pressure[1]);
   const pressureTrend = trendStability;
-  const waterTemp = rangeComfort(context.waterTemp, fish.temp[0], fish.temp[1]);
+  const evidence = context.waterEvidence ?? { waterTemp: "modelled", oxygen: "modelled", turbidity: "modelled", waterLevel: "modelled" };
+  const waterTemp = evidence.waterTemp === "measured" ? rangeComfort(context.waterTemp, fish.temp[0], fish.temp[1]) : .5;
   const wind = windFactor(fish, weather);
   const light = lightFactor(fish, weather);
-  const oxygen = clamp(context.oxygen);
-  const turbidity = predator && fish.id !== "pike" ? clamp(1 - Math.abs(context.turbidity - .55) / .55) : clamp(1 - context.turbidity);
-  const waterLevel = context.waterLevelTrend === "rising" ? (predator ? .85 : .78) : context.waterLevelTrend === "falling" ? .35 : .60;
+  const oxygen = evidence.oxygen === "measured" ? clamp(context.oxygen) : .5;
+  const turbidity = evidence.turbidity === "measured" ? (predator && fish.id !== "pike" ? clamp(1 - Math.abs(context.turbidity - .55) / .55) : clamp(1 - context.turbidity)) : .5;
+  const waterLevel = evidence.waterLevel === "measured" ? (context.waterLevelTrend === "rising" ? (predator ? .85 : .78) : context.waterLevelTrend === "falling" ? .35 : .60) : .5;
   const habitat = habitatFactor(fish, context.waterBody);
   const moon = clamp(1 - 2 * Math.abs(context.moonPhase - .5));
   const season = seasonFactor(fish, context.month, context.waterTemp);
@@ -168,8 +181,12 @@ export function calculateFishForecast(fish: FishSpecies, weather: EngineWeather,
   const completenessFields = [weather.temp, weather.pressure, weather.humidity, weather.wind, weather.cloudiness, context.waterTemp, context.oxygen, context.turbidity, context.waterBody, context.month, context.moonPhase];
   const dataCompleteness = completenessFields.filter((value) => value !== undefined && value !== null && value !== "").length / completenessFields.length;
   const apiResponseQuality = clamp(weather.sourceQuality ?? .85);
+  const measured = Object.entries(evidence).filter(([, value]) => value === "measured").map(([key]) => key);
+  const modelled = Object.entries(evidence).filter(([, value]) => value === "modelled").map(([key]) => key);
+  const missing = Object.entries(evidence).filter(([, value]) => value === "missing").map(([key]) => key);
+  const evidenceCoverage = measured.length / Object.keys(evidence).length;
   const confidenceBreakdown = { dataCompleteness, trendStability, historicalMatch: .60, apiResponseQuality };
-  const confidence = clamp(dataCompleteness * .35 + trendStability * .25 + .60 * .20 + apiResponseQuality * .20);
+  const confidence = clamp(dataCompleteness * .25 + trendStability * .20 + evidenceCoverage * .30 + apiResponseQuality * .25);
   const periods = {} as Record<Period, number>;
   for (const period of PERIODS) {
     const active = fish.active.includes(period);
@@ -182,7 +199,7 @@ export function calculateFishForecast(fish: FishSpecies, weather: EngineWeather,
   const baitAdvice = `Сезонные: ${fish.seasonalBait[context.month >= 3 && context.month <= 5 ? "spring" : context.month >= 6 && context.month <= 8 ? "summer" : context.month >= 9 && context.month <= 11 ? "autumn" : "winter"].slice(0, 2).join(", ")}`;
   const colorAdvice = context.turbidity > .6 ? "Яркие и контрастные цвета" : light < .5 ? "Контрастные тёмные тона" : "Естественные цвета";
   const strategyAdvice = context.waterLevelTrend === "rising" ? "Ищите затопленные участки и обратки" : predator ? "Активный поиск у границ течения и укрытий" : "Тихая ловля с точной подачей прикормки";
-  const reasoning = context.isLegalClosure ? context.legalNotice : `Нормализованные факторы: вода ${Math.round(waterTemp * 100)}%, давление ${Math.round(pressure * 100)}%, тренд ${Math.round(pressureTrend * 100)}%, ветер ${Math.round(wind * 100)}%. Данные ${Math.round(dataCompleteness * 100)}%, доверие ${Math.round(confidence * 100)}%.`;
+  const reasoning = context.isLegalClosure ? context.legalNotice : `Индекс условий: вода ${evidence.waterTemp === "measured" ? Math.round(waterTemp * 100) + "% (измерение)" : "нейтрально (нет измерения)"}, давление ${Math.round(pressure * 100)}%, тренд ${Math.round(pressureTrend * 100)}%, ветер ${Math.round(wind * 100)}%. Покрытие входов: ${Math.round(dataCompleteness * 100)}%; статистическая калибровка отсутствует.`;
   return {
     score: finalScore,
     confidence,
@@ -193,6 +210,7 @@ export function calculateFishForecast(fish: FishSpecies, weather: EngineWeather,
     confidenceBreakdown,
     reasoning,
     legalNotice: context.legalNotice,
+    inputCoverage: { measured, modelled, missing },
     recommendations: { comfortIndex: Math.round(finalScore * 100), depthAdvice, baitAdvice, colorAdvice, strategyAdvice },
   };
 }
@@ -201,4 +219,4 @@ export function validateWeightSums() {
   return Object.values(WEIGHTS).map((weights) => round(Object.values(weights).reduce((sum, weight) => sum + weight, 0), 6));
 }
 
-export const algorithmLegalNotice = "Прогноз вероятностный и не заменяет официальные правила рыболовства. В период нерестовых ограничений ловля блокируется; проверяйте актуальные правила региона.";
+export const algorithmLegalNotice = "Индекс условий является эвристической модельной оценкой и не является калиброванной вероятностью улова. Он не заменяет официальные правила рыболовства; проверяйте актуальные ограничения региона.";
