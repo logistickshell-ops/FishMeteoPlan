@@ -4,6 +4,8 @@ export interface HydrologySnapshot {
   dischargeM3s: number | null;
   dischargeDate: string | null;
   dischargeForecast: Array<{ date: string; value: number }>;
+  dischargeChange3dPct: number | null;
+  dischargeTrend: "rising" | "falling" | "stable" | "missing";
   evidence: {
     discharge: HydrologyEvidence;
     waterTemp: HydrologyEvidence;
@@ -29,6 +31,8 @@ export async function fetchHydrologySnapshot(
     dischargeM3s: null,
     dischargeDate: null,
     dischargeForecast: [] as Array<{ date: string; value: number }>,
+    dischargeChange3dPct: null,
+    dischargeTrend: "missing" as const,
     evidence: {
       discharge: "missing" as const,
       waterTemp: "missing" as const,
@@ -41,12 +45,12 @@ export async function fetchHydrologySnapshot(
     requestedCoordinates,
   };
 
-  // GloFAS returns the nearest major river within a coarse grid. Showing it
-  // for a lake as if it were a lake measurement would create false precision.
-  if (location.type === "lake") {
+  // This source describes river discharge only. It must not be shown for a
+  // city fallback, lake, or reservoir as if it measured that water body.
+  if (location.type !== "river") {
     return {
       ...missingBase,
-      note: "Для озера ближайший речной расход не подменяет измерения в озере.",
+      note: "Для выбранного типа водного объекта модельный речной режим не применим.",
     };
   }
 
@@ -71,6 +75,12 @@ export async function fetchHydrologySnapshot(
       .reverse()
       .find(({ value, index }) => Number.isFinite(value) && dates[index] <= today)?.index;
     const discharge = latestIndex === undefined ? null : Number(values[latestIndex]);
+    const baselineIndex = latestIndex === undefined ? undefined : Math.max(0, latestIndex - 3);
+    const baseline = baselineIndex === undefined ? null : Number(values[baselineIndex]);
+    const change3dPct = discharge !== null && baseline !== null && Number.isFinite(baseline) && baseline !== 0
+      ? Number((((discharge - baseline) / baseline) * 100).toFixed(1))
+      : null;
+    const dischargeTrend = change3dPct === null ? "missing" : change3dPct > 3 ? "rising" : change3dPct < -3 ? "falling" : "stable";
     const forecast = dates
       .map((date, index) => ({ date, value: values[index] }))
       .filter(({ date, value }) => date >= today && Number.isFinite(value))
@@ -82,6 +92,8 @@ export async function fetchHydrologySnapshot(
       dischargeM3s: discharge,
       dischargeDate: latestIndex === undefined ? null : dates[latestIndex] ?? null,
       dischargeForecast: forecast,
+      dischargeChange3dPct: change3dPct,
+      dischargeTrend,
       evidence: {
         ...missingBase.evidence,
         discharge: discharge === null ? "missing" : "modelled",

@@ -12,7 +12,8 @@
     "check:regional-beacons": "node scripts/check-regional-beacons.mjs",
     "check:hydrology": "node scripts/check-hydrology.mjs",
     "check:pressure": "node scripts/check-pressure.mjs",
-    "check:water-search": "node scripts/check-water-search.mjs"
+    "check:water-search": "node scripts/check-water-search.mjs",
+    "check:water-conditions": "node scripts/check-water-conditions.mjs"
   },
   "dependencies": {
     "clsx": "2.1.1",

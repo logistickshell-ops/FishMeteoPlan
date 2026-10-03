@@ -77,6 +77,7 @@ interface WeatherState {
   pressureTrend: "stable" | "falling" | "rising";
   humidity: number;
   wind: number;
+  windGusts?: number;
   dir: string;
   deg: number;
   desc: string;
@@ -85,6 +86,7 @@ interface WeatherState {
   cloudiness: string; // "Ясно" | "Облачно" | "Пасмурно" | "Дождь" | "Гроза" | "Снег"
   month: number; // 1 to 12
   pressureDelta3h?: number;
+  precipitation24h?: number;
   cloudCover?: number;
   dewPoint?: number;
   uvIndex?: number;
@@ -266,7 +268,7 @@ export default function App() {
       setWeatherSnapshots([]);
       setWeatherMode("Сейчас");
       try {
-        const url = `https://api.open-meteo.com/v1/forecast?latitude=${selectedLocation.coords.lat}&longitude=${selectedLocation.coords.lon}&current=temperature_2m,relative_humidity_2m,weather_code,pressure_msl,wind_speed_10m,wind_direction_10m,cloud_cover,dew_point_2m,uv_index&hourly=pressure_msl&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&past_days=1&forecast_days=7&wind_speed_unit=ms&timezone=auto`;
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${selectedLocation.coords.lat}&longitude=${selectedLocation.coords.lon}&current=temperature_2m,relative_humidity_2m,weather_code,pressure_msl,wind_speed_10m,wind_gusts_10m,wind_direction_10m,cloud_cover,dew_point_2m,uv_index,precipitation&hourly=pressure_msl,precipitation&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum&past_days=1&forecast_days=7&wind_speed_unit=ms&timezone=auto`;
         const response = await fetch(url);
         if (!response.ok) throw new Error("Open-Meteo request failed");
         const data = await response.json();
@@ -286,6 +288,11 @@ export default function App() {
         const currentPressure = hpaToMmhg(currentPressureHpa);
         const currentHourIndex = (data.hourly?.time || []).findIndex((time: string) => time.startsWith(String(current.time).slice(0, 13)));
         const pressureDelta3h = currentHourIndex >= 3 ? Number(current.pressure_msl) - Number(data.hourly.pressure_msl[currentHourIndex - 3]) : 0;
+        const hourlyTimes: string[] = data.hourly?.time || [];
+        const hourlyPrecipitation: number[] = data.hourly?.precipitation || [];
+        const currentPrecipitation24h = Array.from({ length: 24 }, (_, offset) => currentHourIndex - offset)
+          .filter((index) => index >= 0 && Number.isFinite(hourlyPrecipitation[index]))
+          .reduce((sum, index) => sum + Number(hourlyPrecipitation[index]), 0);
         const currentState: WeatherState = {
           temp: Math.round(Number(current.temperature_2m)),
           pressure: currentPressure,
@@ -293,6 +300,7 @@ export default function App() {
           pressureTrend: "stable",
           humidity: Math.round(Number(current.relative_humidity_2m)),
           wind: Number(Number(current.wind_speed_10m || 0).toFixed(1)),
+          windGusts: Number(Number(current.wind_gusts_10m || 0).toFixed(1)),
           dir: dirs[Math.round(Number(current.wind_direction_10m || 0) / 45) % 8],
           deg: Number(current.wind_direction_10m || 0),
           desc: currentDesc.desc,
@@ -301,13 +309,13 @@ export default function App() {
           cloudiness: currentDesc.cloudiness,
           month: new Date().getMonth() + 1,
           pressureDelta3h,
+          precipitation24h: Number(currentPrecipitation24h.toFixed(1)),
           cloudCover: Number(current.cloud_cover ?? 50),
           dewPoint: Number(current.dew_point_2m ?? current.temperature_2m),
           uvIndex: Number(current.uv_index ?? 0),
           sourceQuality: 1,
           forecastDate: String(current.time || new Date().toISOString()).slice(0, 10),
         };
-        const hourlyTimes: string[] = data.hourly?.time || [];
         const hourlyPressures: number[] = data.hourly?.pressure_msl || [];
         const pressureForDate = (date: string) => {
           const index = hourlyTimes.findIndex((time) => time.startsWith(`${date}T12`));
@@ -381,15 +389,14 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     async function fetchHydrology() {
-      if (!savedLocation) {
+      if (!savedLocation || !selectedWaterObject) {
         setHydrology(null);
         return;
       }
-      const waterLocation = selectedWaterObject || { coords: savedLocation.coords, type: savedLocation.type };
       const snapshot = await fetchHydrologySnapshot({
-        lat: waterLocation.coords.lat,
-        lon: waterLocation.coords.lon,
-        type: waterLocation.type,
+        lat: selectedWaterObject.coords.lat,
+        lon: selectedWaterObject.coords.lon,
+        type: selectedWaterObject.type,
       });
       if (!cancelled) setHydrology(snapshot);
     }
@@ -533,6 +540,13 @@ export default function App() {
   // Select the weather period that drives the fishing calculation.
   const selectedSnapshot = useMemo(() => weatherSnapshots.find((item) => item.label === weatherMode) || weatherSnapshots.find((item) => item.date === weatherMode), [weatherSnapshots, weatherMode]);
   const activeWeather = sandboxMode ? sandboxWeather : (selectedSnapshot || realWeather || getSeasonalFallback(selectedLocation.id));
+  const waterConditionsAdvice = useMemo(() => {
+    const windText = activeWeather.wind <= 2 ? "ветер слабый" : activeWeather.wind <= 5 ? "ветер умеренный" : "ветер сильный";
+    const pressureText = activeWeather.pressureTrend === "falling" ? "давление снижается" : activeWeather.pressureTrend === "rising" ? "давление растёт" : "давление без резких изменений";
+    const rainText = (activeWeather.precipitation24h ?? 0) > 5 ? "осадки заметные" : (activeWeather.precipitation24h ?? 0) > 0 ? "осадки небольшие" : "осадков за сутки почти не было";
+    const shelter = activeWeather.wind >= 5 ? `Ищите участки с укрытием от ветра ${activeWeather.dir}.` : "Подойдут открытые участки и обычные береговые точки.";
+    return `${windText}, ${pressureText}, ${rainText}. ${shelter}`;
+  }, [activeWeather]);
 
   // Calculates Moon Phase from active date
   const moonInfo = useMemo(() => {
@@ -1001,38 +1015,21 @@ export default function App() {
         </section>
 
         {hasLocation && (
-          <section className="mb-6 rounded-2xl border border-cyan-500/25 bg-gradient-to-r from-cyan-950/55 via-slate-900 to-blue-950/50 p-4 shadow-lg">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex items-start gap-3">
-                <div className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-2.5 text-cyan-300"><Waves className="h-5 w-5" /></div>
-                <div>
-                  <h3 className="text-sm font-black uppercase tracking-wide text-white">Водный объект для прогноза</h3>
-                  <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-300">Выберите реку, озеро или водохранилище рядом с городом. Гидрологические данные запрашиваются для выбранной точки, а не для условного центра города.</p>
-                </div>
+          <section className="mb-6 rounded-2xl border border-cyan-500/25 bg-slate-900/80 p-3 shadow-lg">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 items-center gap-2.5">
+                <Waves className="h-5 w-5 shrink-0 text-cyan-300" />
+                <div className="min-w-0"><h3 className="truncate text-sm font-black text-white">Водный объект</h3><p className="truncate text-[10px] text-slate-400">Не выбран — прогноз работает по погоде города</p></div>
               </div>
-              <div className="relative w-full lg:max-w-sm">
-                <div className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-950/70 px-3 py-2.5">
-                  <Search className="h-4 w-4 text-cyan-400" />
-                  <input value={waterSearch} onChange={(e) => setWaterSearch(e.target.value)} placeholder="Найти реку или озеро" className="w-full bg-transparent text-sm text-white outline-none placeholder:text-slate-500" />
-                  {isWaterSearching && <span className="text-[10px] text-slate-500">поиск…</span>}
+              <div className="relative w-full sm:max-w-xs">
+                <div className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2">
+                  <Search className="h-4 w-4 text-cyan-400" /><input value={waterSearch} onChange={(e) => setWaterSearch(e.target.value)} placeholder="Найти реку или озеро" className="w-full bg-transparent text-xs text-white outline-none placeholder:text-slate-500" />{isWaterSearching && <span className="text-[10px] text-slate-500">…</span>}
                 </div>
               </div>
             </div>
-            <div className="mt-4 flex gap-2 overflow-x-auto pb-1 scrollbar-none">
-              {waterObjects.slice(0, 12).map((water) => {
-                const active = selectedWaterObject?.id === water.id;
-                return <button key={water.id} onClick={() => setSelectedWaterObject(water)} className={`min-w-[190px] rounded-xl border p-3 text-left transition ${active ? "border-cyan-300 bg-cyan-500/15 shadow-md shadow-cyan-500/10" : "border-slate-700 bg-slate-950/50 hover:border-cyan-500/50"}`}>
-                  <div className="flex items-center justify-between gap-2"><span className="truncate text-xs font-black text-white">{water.name}</span><span className="shrink-0 text-[9px] font-bold uppercase text-cyan-300">{water.type === "river" ? "река" : water.type === "lake" ? "озеро" : "вдхр."}</span></div>
-                  <div className="mt-1 text-[10px] text-slate-400">{water.distanceKm.toFixed(1)} км · {water.source}</div>
-                </button>;
-              })}
-              {!isWaterSearching && waterObjects.length === 0 && <div className="rounded-xl border border-dashed border-slate-700 px-3 py-2 text-xs text-slate-400">Объекты не найдены — попробуйте название реки.</div>}
-            </div>
+            {selectedWaterObject && <div className="mt-2 flex items-center justify-between rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-3 py-2 text-xs"><span className="truncate text-cyan-200">{selectedWaterObject.name} · {selectedWaterObject.type === "river" ? "река" : selectedWaterObject.type === "lake" ? "озеро" : "водохранилище"}</span><button onClick={() => setSelectedWaterObject(null)} className="ml-2 shrink-0 text-[10px] text-slate-400 underline hover:text-white">сбросить</button></div>}
+            {!selectedWaterObject && waterObjects.length > 0 && <div className="mt-2 flex gap-1.5 overflow-x-auto pb-0.5 scrollbar-none">{waterObjects.slice(0, 6).map((water) => <button key={water.id} onClick={() => setSelectedWaterObject(water)} className="shrink-0 rounded-lg border border-slate-700 bg-slate-950/60 px-2.5 py-1.5 text-left hover:border-cyan-400"><span className="block max-w-[140px] truncate text-[10px] font-bold text-white">{water.name}</span><span className="text-[9px] text-slate-500">{water.distanceKm.toFixed(1)} км</span></button>)}</div>}
             {waterSearchError && <p className="mt-2 text-[10px] text-amber-300">{waterSearchError}</p>}
-            <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] text-slate-400">
-              <span>Выбрано:</span><strong className="text-cyan-300">{selectedWaterObject?.name || "городская точка, водоём не выбран"}</strong>
-              {selectedWaterObject && <button onClick={() => setSelectedWaterObject(null)} className="text-slate-500 underline hover:text-white">сбросить</button>}
-            </div>
           </section>
         )}
 
@@ -1385,43 +1382,29 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Hydro-state & Water conditions card */}
+                {/* Practical water conditions: weather, optional river regime, measurements */}
                 <div className="rounded-2xl bg-slate-800 p-5 shadow-lg border border-slate-700/80">
-                  <h3 className="text-sm font-bold text-slate-200 border-b border-slate-700/50 pb-3 mb-4 flex items-center gap-2 uppercase tracking-wide">
-                    <Waves className="h-4 w-4 text-cyan-400" />
-                    Водные ресурсы · {selectedWaterObject?.name || selectedLocation.name}
-                  </h3>
-                  <div className="space-y-2.5 text-xs text-slate-300">
-                    <div className="flex justify-between">
-                      <span>Температура воды:</span>
-                      <strong className="text-amber-300">Нет измерения</strong>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>Растворённый кислород:</span>
-                      <strong className="text-amber-300">Нет измерения</strong>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>Прозрачность / мутность:</span>
-                      <strong className="text-amber-300">Нет измерения</strong>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>Речной расход:</span>
-                      <strong className={hydrology?.dischargeM3s !== null && hydrology?.dischargeM3s !== undefined ? "text-cyan-300" : "text-amber-300"}>
-                        {hydrology?.dischargeM3s !== null && hydrology?.dischargeM3s !== undefined ? `${hydrology.dischargeM3s.toFixed(1)} м³/с · модель` : "Нет данных"}
-                      </strong>
-                    </div>
-                    <div className="pt-2 border-t border-slate-700/50 text-[10px] text-slate-400">
-                      {hydrology?.note || "Гидрологические показатели ещё не загружены."}
-                      {hydrology?.dischargeDate && <span className="block mt-1">Дата расхода: {hydrology.dischargeDate}</span>}
-                      <span className="block mt-1">Ветер и волнение показываются отдельно по погодной модели; они не являются измерением прозрачности воды.</span>
-                    </div>
-                    <div className="pt-3 border-t border-slate-700/50">
-                      <div className="mb-2 flex items-center justify-between"><span className="text-[10px] font-bold uppercase tracking-wide text-cyan-300">Прогноз речного расхода</span><span className="text-[9px] text-slate-500">GloFAS · модель</span></div>
-                      <div className="grid grid-cols-4 gap-1.5">
-                        {(hydrology?.dischargeForecast || []).map((item) => <div key={item.date} className="rounded-lg bg-slate-900/60 p-2 text-center"><div className="text-[9px] text-slate-500">{item.date.slice(5)}</div><strong className="text-[11px] text-cyan-200">{item.value.toFixed(0)}</strong><div className="text-[8px] text-slate-500">м³/с</div></div>)}
-                        {(!hydrology || hydrology.dischargeForecast.length === 0) && <div className="col-span-4 rounded-lg border border-dashed border-slate-700 p-2 text-[10px] text-slate-500">Прогноз расхода недоступен или выбранное озеро не имеет сопоставимого речного расхода.</div>}
+                  <h3 className="text-sm font-bold text-slate-200 border-b border-slate-700/50 pb-3 mb-4 flex items-center gap-2 uppercase tracking-wide"><Waves className="h-4 w-4 text-cyan-400" /> Условия на воде</h3>
+                  <div className="space-y-4 text-xs text-slate-300">
+                    <section>
+                      <div className="mb-2 text-[10px] font-black uppercase tracking-wide text-cyan-300">1 · Практические погодные условия</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="rounded-lg bg-slate-900/50 p-2"><span className="block text-[10px] text-slate-400">Ветер</span><strong className="text-white">{activeWeather.wind.toFixed(1)} м/с, {activeWeather.dir}</strong></div>
+                        <div className="rounded-lg bg-slate-900/50 p-2"><span className="block text-[10px] text-slate-400">Порывы</span><strong className="text-white">до {(activeWeather.windGusts ?? activeWeather.wind).toFixed(1)} м/с</strong></div>
+                        <div className="rounded-lg bg-slate-900/50 p-2"><span className="block text-[10px] text-slate-400">Осадки за 24 часа</span><strong className="text-white">{(activeWeather.precipitation24h ?? 0).toFixed(1)} мм</strong></div>
+                        <div className="rounded-lg bg-slate-900/50 p-2"><span className="block text-[10px] text-slate-400">Давление</span><strong className="text-white">{activeWeather.pressure} мм</strong><span className="block text-[9px] text-slate-500">{activeWeather.pressureDelta3h && activeWeather.pressureHpa ? `${activeWeather.pressureDelta3h > 0 ? "+" : ""}${activeWeather.pressureDelta3h.toFixed(1)} гПа за 3 ч` : "тренд не определён"}</span></div>
                       </div>
-                    </div>
+                    </section>
+                    {selectedWaterObject?.type === "river" && <section className="border-t border-slate-700/50 pt-3">
+                      <div className="mb-2 text-[10px] font-black uppercase tracking-wide text-cyan-300">2 · Состояние речного режима</div>
+                      {hydrology?.dischargeTrend !== "missing" ? <div className="grid grid-cols-2 gap-2"><div className="rounded-lg bg-slate-900/50 p-2"><span className="block text-[10px] text-slate-400">Режим реки</span><strong className="text-white">{hydrology?.dischargeTrend === "rising" ? "повышается" : hydrology?.dischargeTrend === "falling" ? "снижается" : "стабильный"}</strong></div><div className="rounded-lg bg-slate-900/50 p-2"><span className="block text-[10px] text-slate-400">Изменение за 3 дня</span><strong className="text-white">{hydrology?.dischargeChange3dPct !== null && hydrology?.dischargeChange3dPct !== undefined ? `${hydrology.dischargeChange3dPct > 0 ? "+" : ""}${hydrology.dischargeChange3dPct.toFixed(1)}%` : "нет данных"}</strong></div><p className="col-span-2 text-[10px] text-slate-400">Модельный тренд GloFAS. Абсолютный расход не используется как измерение на месте ловли.</p></div> : <p className="rounded-lg border border-dashed border-slate-700 p-2 text-[10px] text-slate-400">Модельный речной режим временно недоступен.</p>}
+                    </section>}
+                    <section className="border-t border-slate-700/50 pt-3">
+                      <div className="mb-2 text-[10px] font-black uppercase tracking-wide text-cyan-300">{selectedWaterObject?.type === "river" ? "3" : "2"} · Измерения</div>
+                      <p className="text-[11px] text-amber-200">Фактических измерений воды для выбранного объекта нет.</p>
+                      <p className="mt-1 text-[10px] leading-relaxed text-slate-400">Температура воды и мутность не подменяются погодной моделью.</p>
+                    </section>
+                    <div className="border-t border-slate-700/50 pt-3"><div className="mb-1 text-[10px] font-black uppercase tracking-wide text-cyan-300">Вывод для рыбалки</div><p className="text-[11px] leading-relaxed text-slate-200">{waterConditionsAdvice}</p></div>
                   </div>
                 </div>
               </div>

@@ -8,7 +8,7 @@ const required = [
   'oxygen: "missing"',
   'turbidity: "missing"',
   'waterLevel: "missing"',
-  "Для озера ближайший речной расход не подменяет измерения в озере",
+  "Для выбранного типа водного объекта модельный речной режим не применим",
 ];
 for (const marker of required) {
   if (!source.includes(marker)) throw new Error(`Hydrology provenance marker missing: ${marker}`);
