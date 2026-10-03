@@ -38,6 +38,7 @@ import {
   weatherChecklists,
   FishSpecies as FishType
 } from "./data/fishingData";
+import { waterBodies } from "./data/waterData";
 import { useTelegram } from "./hooks/useTelegram";
 import { algorithmLegalNotice, calculateFishForecast } from "./algorithm/forecastEngine";
 
@@ -85,6 +86,10 @@ interface CatchEntry {
 
 export default function App() {
   const { user: tmaUser, hapticSelection } = useTelegram();
+  const profileId = tmaUser ? String(tmaUser.id) : "guest";
+  const storagePrefix = `fishmeteoplan:${profileId}`;
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [profileHydrated, setProfileHydrated] = useState(false);
 
   // Navigation tabs: "forecast" | "fish" | "spots" | "log" | "guide"
   const [activeTab, setActiveTab] = useState<string>("forecast");
@@ -158,6 +163,58 @@ export default function App() {
   const [iceThickness, setIceThickness] = useState<number>(8);
   const [iceQuality, setIceQuality] = useState<"monolith" | "porous" | "slush">("monolith");
   const [selectedKnotIndex, setSelectedKnotIndex] = useState<number>(0);
+
+  // Per-user profile: Telegram ID when available, browser-local guest profile otherwise.
+  useEffect(() => {
+    setProfileHydrated(false);
+    try {
+      const savedTheme = localStorage.getItem(`${storagePrefix}:theme`);
+      const savedCity = localStorage.getItem(`${storagePrefix}:city`);
+      const savedCatchLog = localStorage.getItem(`${storagePrefix}:catch-log`);
+      if (savedTheme === "light" || savedTheme === "dark") setTheme(savedTheme);
+      if (savedCity) {
+        const city = JSON.parse(savedCity);
+        if (city.customLocation) setCustomLocation(city.customLocation);
+        if (city.selectedLocId) setSelectedLocId(city.selectedLocId);
+        setCitySearch(city.customLocation?.name || locations.find((item) => item.id === city.selectedLocId)?.name || "");
+      } else {
+        setSelectedLocId("yaroslavl");
+        setCustomLocation(null);
+        setCitySearch("Ярославль");
+      }
+      if (savedCatchLog) {
+        setCatchLog(JSON.parse(savedCatchLog));
+      } else {
+        const legacyStorageKey = "yarrybak_catch_log_v2";
+        const legacy = localStorage.getItem(legacyStorageKey);
+        const initialLogs: CatchEntry[] = legacy ? JSON.parse(legacy) : [
+          { id: "1", species: "Щука", weight: 4.8, length: 82, location: "Спасский монастырь — оз. Неро", bait: "Спининг (блесна-колебалка Mepps Syclops)", date: "2025-10-14", notes: "Взяла на плавной проводке у самой кромки тростника. Сумасшедшая свечка при вываживании! Погода была пасмурная с моросящим дождиком.", weatherDetails: "Пасмурно, 12°C, ветер ЮЗ 3 м/с" },
+          { id: "2", species: "Лещ", weight: 2.1, length: 46, location: "Стрелка реки Волги и Которосль", bait: "Фидер (бутерброд опарыш + кукуруза)", date: "2025-08-02", notes: "Поклёвка уверенная в 5:30 утра. Дистанция 42 метра, ракушечник на бровке. Кормил пшенкой со жмыхом и чесночным ароматизатором.", weatherDetails: "Ясно, 22°C, ветер Ю 1 м/с" },
+          { id: "3", species: "Окунь", weight: 0.72, length: 31, location: "Брейтовская коса (Сить)", bait: "Спиннинг (виброхвост Keitech 2\" на отводном)", date: "2025-09-18", notes: "Стайный окунь. Клевал на каждой проводке в течение получаса на вечерней зорьке. Плавный скат с песчаного полива.", weatherDetails: "Облачно с прояснениями, 15°C, ветер З 4 м/с" }
+        ];
+        setCatchLog(initialLogs);
+      }
+    } catch (error) {
+      console.warn("Не удалось загрузить профиль пользователя", error);
+    } finally {
+      setProfileHydrated(true);
+    }
+  }, [storagePrefix]);
+
+  useEffect(() => {
+    if (!profileHydrated) return;
+    localStorage.setItem(`${storagePrefix}:theme`, theme);
+  }, [profileHydrated, storagePrefix, theme]);
+
+  useEffect(() => {
+    if (!profileHydrated) return;
+    localStorage.setItem(`${storagePrefix}:city`, JSON.stringify({ selectedLocId, customLocation }));
+  }, [profileHydrated, storagePrefix, selectedLocId, customLocation]);
+
+  useEffect(() => {
+    if (!profileHydrated) return;
+    localStorage.setItem(`${storagePrefix}:catch-log`, JSON.stringify(catchLog));
+  }, [profileHydrated, storagePrefix, catchLog]);
 
   // Open-Meteo: current conditions, yesterday, today, tomorrow and 7-day forecast.
   useEffect(() => {
@@ -279,63 +336,9 @@ export default function App() {
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [citySearch]);
 
-  // Load and Save Catch Log from Local Storage
-  useEffect(() => {
-    const storageKey = "fishmeteoplan_catch_log_v2";
-    const legacyStorageKey = "yarrybak_catch_log_v2";
-    const saved = localStorage.getItem(storageKey) ?? localStorage.getItem(legacyStorageKey);
-    if (saved) {
-      try {
-        setCatchLog(JSON.parse(saved));
-        if (!localStorage.getItem(storageKey)) localStorage.setItem(storageKey, saved);
-      } catch (e) {
-        console.error("Error parsing catch log", e);
-      }
-    } else {
-      // Pre-populate with beautiful starter entries
-      const initialLogs: CatchEntry[] = [
-        {
-          id: "1",
-          species: "Щука",
-          weight: 4.8,
-          length: 82,
-          location: "Спасский монастырь — оз. Неро",
-          bait: "Спининг (блесна-колебалка Mepps Syclops)",
-          date: "2025-10-14",
-          notes: "Взяла на плавной проводке у самой кромки тростника. Сумасшедшая свечка при вываживании! Погода была пасмурная с моросящим дождиком.",
-          weatherDetails: "Пасмурно, 12°C, ветер ЮЗ 3 м/с"
-        },
-        {
-          id: "2",
-          species: "Лещ",
-          weight: 2.1,
-          length: 46,
-          location: "Стрелка реки Волги и Которосль",
-          bait: "Фидер (бутерброд опарыш + кукуруза)",
-          date: "2025-08-02",
-          notes: "Поклёвка уверенная в 5:30 утра. Дистанция 42 метра, ракушечник на бровке. Кормил пшенкой со жмыхом и чесночным ароматизатором.",
-          weatherDetails: "Ясно, 22°C, ветер Ю 1 м/с"
-        },
-        {
-          id: "3",
-          species: "Окунь",
-          weight: 0.72,
-          length: 31,
-          location: "Брейтовская коса (Сить)",
-          bait: "Спиннинг (виброхвост Keitech 2\" на отводном)",
-          date: "2025-09-18",
-          notes: "Стайный окунь. Клевал на каждой проводке в течение получаса на вечерней зорьке. Плавный скат с песчаного полива.",
-          weatherDetails: "Облачно с прояснениями, 15°C, ветер З 4 м/с"
-        }
-      ];
-      setCatchLog(initialLogs);
-      localStorage.setItem("fishmeteoplan_catch_log_v2", JSON.stringify(initialLogs));
-    }
-  }, []);
-
+  // Catch log writes are scoped by the Telegram user ID/profile above.
   const saveCatches = (logs: CatchEntry[]) => {
     setCatchLog(logs);
-    localStorage.setItem("fishmeteoplan_catch_log_v2", JSON.stringify(logs));
   };
 
   // Get seasonal offline default weather
@@ -769,7 +772,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-slate-900 font-sans text-slate-100 antialiased selection:bg-cyan-500 selection:text-white">
+    <div className={`${theme === "light" ? "theme-light" : "theme-dark"} min-h-screen bg-slate-900 font-sans text-slate-100 antialiased selection:bg-cyan-500 selection:text-white`}>
       {/* Top Banner / Spawning Ban Warning */}
       {isSpawningBanActive && (
         <div className="bg-gradient-to-r from-red-600 via-orange-600 to-red-600 px-4 py-2 text-center text-xs font-bold uppercase tracking-wider text-white flex items-center justify-center gap-2 animate-pulse shadow-md">
@@ -804,7 +807,7 @@ export default function App() {
                   <span>🎣 Привет, {tmaUser.first_name}!</span>
                 </div>
               )}
-              <div className="hidden items-center gap-3 md:flex">
+              <div className="flex items-center gap-2">
                 <div className="rounded-lg bg-slate-800 px-3 py-1 text-xs text-slate-300 flex items-center gap-2 border border-slate-700">
                   <span className={`inline-block h-2 w-2 rounded-full ${isApiLoading ? "bg-amber-400 animate-ping" : apiSuccess ? "bg-emerald-400" : "bg-sky-400"}`} />
                   <span>
@@ -819,6 +822,16 @@ export default function App() {
                     Гео: {selectedLocation.name}
                   </p>
                 </div>
+                <button
+                  type="button"
+                  aria-label={theme === "dark" ? "Включить светлую тему" : "Включить тёмную тему"}
+                  title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+                  onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+                  className="flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-2.5 py-2 text-xs font-bold text-slate-200 transition hover:border-cyan-400 hover:text-white cursor-pointer"
+                >
+                  {theme === "dark" ? <Sun className="h-4 w-4 text-amber-300" /> : <MoonIcon className="h-4 w-4 text-cyan-300" />}
+                  <span className="hidden xl:inline">{theme === "dark" ? "Светлая" : "Тёмная"}</span>
+                </button>
               </div>
             </div>
           </div>
@@ -1890,6 +1903,36 @@ export default function App() {
                 {/* Verified spots listings for the selected built-in city */}
                 <div className="space-y-4">
                   <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-xs text-slate-300">Показываем публичные рыболовные ориентиры из каталога ФишМетеоПлан для выбранного встроенного города. Для города, найденного через поиск, точки появятся после отдельной проверки и добавления в каталог.</div>
+                  <div className="rounded-2xl bg-slate-800 p-5 shadow-lg border border-slate-700/80 space-y-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h3 className="font-montserrat text-lg font-bold text-white">Водоёмы для рыбалки</h3>
+                        <p className="text-[10px] text-slate-400">Реки, озёра, пруды и водохранилища рядом с {selectedLocation.name}</p>
+                      </div>
+                      <Waves className="h-5 w-5 text-cyan-400" />
+                    </div>
+                    {waterBodies.filter((water) => water.locationId === selectedLocation.id).length > 0 ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {waterBodies.filter((water) => water.locationId === selectedLocation.id).map((water) => (
+                          <article key={water.id} className="rounded-xl border border-slate-700 bg-slate-900/50 p-3 space-y-2">
+                            <div className="flex items-start justify-between gap-2">
+                              <h4 className="font-bold text-white text-sm">{water.name}</h4>
+                              <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[9px] font-bold text-cyan-300">{water.type}</span>
+                            </div>
+                            <p className="text-[10px] text-slate-400">{water.relation}</p>
+                            <p className="text-xs text-slate-300 leading-relaxed"><strong className="text-cyan-300">Рыбалка:</strong> {water.fishingNotes}</p>
+                            <p className="text-[10px] text-amber-200/80 leading-relaxed"><strong>Доступ:</strong> {water.accessNotes}</p>
+                            <div className="flex flex-wrap gap-2 pt-1">
+                              {water.sources.slice(0, 2).map((source) => <a key={source} href={source} target="_blank" rel="noreferrer" className="text-[9px] text-cyan-400 underline hover:text-white">Источник</a>)}
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="rounded-xl border border-dashed border-slate-700 p-4 text-xs text-slate-400">Для города, найденного через поиск, база водоёмов пока не заполнена.</p>
+                    )}
+                    <p className="text-[10px] text-slate-500">Карточка подтверждает существование и публичное описание водоёма, но не разрешение на ловлю. Перед поездкой проверьте актуальные правила, нерестовые ограничения и доступ.</p>
+                  </div>
                   <div className="flex items-center justify-between">
                     <h3 className="font-montserrat text-lg font-bold text-white flex items-center gap-2">
                       <span>Проверенные места: {selectedLocation.name} ({filteredSpots.length})</span>
