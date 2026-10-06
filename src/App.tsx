@@ -43,6 +43,7 @@ import {
 import { getFishingSpotsForCity } from "./data/fishingSpots";
 import { getRegionalBeacon } from "./data/regionalBeacons";
 import { fetchHydrologySnapshot, HydrologySnapshot } from "./services/hydrology";
+import { fetchOfficialWaterObservation } from "./services/yacgmsHydrology";
 import { findNearbyWaterObjects, searchWaterObjects, WaterObject } from "./services/waterSearch";
 import { useTelegram } from "./hooks/useTelegram";
 import { algorithmLegalNotice, calculateFishForecast } from "./algorithm/forecastEngine";
@@ -114,6 +115,15 @@ interface CatchEntry {
   weatherDetails?: string;
 }
 
+interface PreparationPlan {
+  date: string;
+  duration: "day" | "night" | "24h";
+  details: string;
+  tackles: string[];
+  fish: string[];
+  access: "bank" | "boat";
+}
+
 export default function App() {
   const { user: tmaUser, hapticSelection } = useTelegram();
   const profileId = tmaUser ? String(tmaUser.id) : "guest";
@@ -121,7 +131,7 @@ export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [profileHydrated, setProfileHydrated] = useState(false);
 
-  // Navigation tabs: "forecast" | "fish" | "spots" | "log" | "guide"
+  // Navigation tabs: "forecast" | "fish" | "spots" | "prep" | "guide"
   const [activeTab, setActiveTab] = useState<string>("forecast");
 
   const handleTabChange = (tab: string) => { hapticSelection(); setActiveTab(tab); };
@@ -193,6 +203,15 @@ export default function App() {
     notes: "Поклёвка уверенная, ловил на бровке.",
   });
 
+  const [preparation, setPreparation] = useState<PreparationPlan>({
+    date: new Date().toISOString().split("T")[0],
+    duration: "day",
+    details: "",
+    tackles: ["фидер"],
+    fish: ["Лещ"],
+    access: "bank",
+  });
+
   // Safety & Tools states
   const [iceThickness, setIceThickness] = useState<number>(8);
   const [iceQuality, setIceQuality] = useState<"monolith" | "porous" | "slush">("monolith");
@@ -206,6 +225,7 @@ export default function App() {
       const savedCity = localStorage.getItem(`${storagePrefix}:city`);
       const savedWater = localStorage.getItem(`${storagePrefix}:water-object`);
       const savedCatchLog = localStorage.getItem(`${storagePrefix}:catch-log`);
+      const savedPreparation = localStorage.getItem(`${storagePrefix}:preparation`);
       if (savedTheme === "light" || savedTheme === "dark") setTheme(savedTheme);
       if (savedCity) {
         const city = JSON.parse(savedCity);
@@ -223,6 +243,7 @@ export default function App() {
       } else {
         setCatchLog([]);
       }
+      if (savedPreparation) setPreparation((current) => ({ ...current, ...JSON.parse(savedPreparation) }));
     } catch (error) {
       console.warn("Не удалось загрузить профиль пользователя", error);
     } finally {
@@ -250,6 +271,11 @@ export default function App() {
     if (!profileHydrated) return;
     localStorage.setItem(`${storagePrefix}:catch-log`, JSON.stringify(catchLog));
   }, [profileHydrated, storagePrefix, catchLog]);
+
+  useEffect(() => {
+    if (!profileHydrated) return;
+    localStorage.setItem(`${storagePrefix}:preparation`, JSON.stringify(preparation));
+  }, [profileHydrated, storagePrefix, preparation]);
 
   // Open-Meteo: current conditions, yesterday, today, tomorrow and 7-day forecast.
   useEffect(() => {
@@ -398,6 +424,23 @@ export default function App() {
         lon: selectedWaterObject.coords.lon,
         type: selectedWaterObject.type,
       });
+      if (selectedLocation.name.toLocaleLowerCase("ru-RU").includes("ярослав") && selectedWaterObject.type === "river") {
+        try {
+          const observation = await fetchOfficialWaterObservation(selectedWaterObject.name);
+          if (observation) {
+            snapshot.measuredWaterTempC = observation.waterTempC;
+            snapshot.measuredWaterLevelCm = observation.levelCm;
+            snapshot.measuredStation = observation.station;
+            snapshot.measuredAt = observation.measuredAt;
+            snapshot.measuredSourceUrl = observation.sourceUrl;
+            snapshot.measuredSourceLabel = observation.sourceLabel;
+            snapshot.evidence.waterTemp = observation.waterTempC === null ? "missing" : "measured";
+            snapshot.evidence.waterLevel = observation.levelCm === null ? "missing" : "measured";
+          }
+        } catch (error) {
+          snapshot.error = "Официальная гидрологическая страница временно недоступна; измерения не заменяются моделью.";
+        }
+      }
       if (!cancelled) setHydrology(snapshot);
     }
     void fetchHydrology();
@@ -596,6 +639,7 @@ export default function App() {
 
   // Calculates estimated water temperature
   const waterTemp = useMemo(() => {
+    if (hydrology?.measuredWaterTempC !== null && hydrology?.measuredWaterTempC !== undefined) return hydrology.measuredWaterTempC;
     const air = activeWeather.temp;
     const month = activeWeather.month;
 
@@ -617,7 +661,7 @@ export default function App() {
     const calculated = air - baseDiff + correction;
 
     return Math.max(0.5, Math.round(calculated * 10) / 10);
-  }, [activeWeather]);
+  }, [activeWeather, hydrology]);
 
   // ===== NORMALIZED, TRACEABLE BITE FORECAST ENGINE =====
   const regionalBeacon = useMemo(() => getRegionalBeacon(selectedLocation.name), [selectedLocation.name]);
@@ -642,23 +686,24 @@ export default function App() {
     const day = targetDate.getDate();
     const isLegalClosure = month >= 4 && (month > 4 || day >= 15) && (month < 6 || day <= 1);
     const legalNotice = isLegalClosure ? `${spawningRules.region}: действует период нерестовых ограничений ${spawningRules.dates}. Прогноз клёва заблокирован до проверки официальных правил.` : algorithmLegalNotice;
-    const waterLevelTrend = activeWeather.rain ? "rising" : activeWeather.temp > 25 && activeWeather.wind < 3 ? "falling" : "stable";
-    const oxygen = Math.max(0, Math.min(1, 0.30 + activeWeather.wind * .06 + activeWeather.humidity * .004 - (activeWeather.temp > 25 ? .15 : 0)));
-    const turbidity = activeWeather.rain ? .80 : activeWeather.wind > 6 ? .50 : .20;
+      const oxygen = 0;
+      const turbidity = 0;
+      const waterTempForEngine = hydrology?.measuredWaterTempC ?? 0;
+      const waterLevelTrendForEngine = hydrology?.dischargeTrend === "rising" ? "rising" : hydrology?.dischargeTrend === "falling" ? "falling" : "stable";
     const moonPhase = moonInfo.phase / 100;
     const result: Record<string, any> = {};
     fishSpecies.forEach((fish) => {
       const engine = calculateFishForecast(fish, weather, {
-        waterTemp,
-        waterLevelTrend,
+          waterTemp: waterTempForEngine,
+          waterLevelTrend: waterLevelTrendForEngine,
         turbidity,
           oxygen,
           waterBody: selectedLocation.type,
           waterEvidence: {
-            waterTemp: "modelled",
-            oxygen: "modelled",
-            turbidity: "modelled",
-            waterLevel: "modelled",
+            waterTemp: hydrology?.measuredWaterTempC !== null && hydrology?.measuredWaterTempC !== undefined ? "measured" : "missing",
+            oxygen: "missing",
+            turbidity: "missing",
+            waterLevel: hydrology?.measuredWaterLevelCm !== null && hydrology?.measuredWaterLevelCm !== undefined ? "measured" : "missing",
           },
           regionalBeaconId: regionalBeacon?.id,
         latitude: selectedLocation.coords.lat,
@@ -697,7 +742,7 @@ export default function App() {
       };
     });
     return result;
-  }, [activeWeather, apiSuccess, moonInfo, waterTemp, selectedLocation, regionalBeacon]);
+  }, [activeWeather, apiSuccess, moonInfo, waterTemp, hydrology, selectedLocation, regionalBeacon]);
 
   // Weather state visual badge colors helper
   const getBiteBadgeDetails = (score: number) => {
@@ -765,6 +810,27 @@ export default function App() {
     const fishMatch = spotFishFilter === "all" || spot.fish.some((fish) => fish.toLowerCase() === spotFishFilter.toLowerCase());
     return tackleMatch && fishMatch;
   }), [citySpots, spotTackleFilter, spotFishFilter]);
+
+  const preparationReport = useMemo(() => {
+    const targetFish = fishSpecies.filter((fish) => preparation.fish.includes(fish.name));
+    const mainFish = targetFish[0] || fishSpecies[0];
+    const month = new Date(`${preparation.date}T12:00:00`).getMonth() + 1;
+    const season = month <= 2 || month === 12 ? "зима" : month <= 5 ? "весна" : month <= 8 ? "лето" : "осень";
+    const coldWater = activeWeather.temp < 10 || season === "зима";
+    const isRiver = selectedWaterObject?.type === "river";
+    const groundbait = mainFish.type === "predator"
+      ? "Прикормка не является основной тактикой; ищите кормовую рыбу и меняйте горизонт."
+      : coldWater
+        ? "Небольшая порция тёмной смеси с животным компонентом; докорм точечный."
+        : "Стартовая порция умеренная, затем докорм малыми порциями по реакции рыбы.";
+    const bait = mainFish.seasonalBait[season === "зима" ? "winter" : season === "весна" ? "spring" : season === "лето" ? "summer" : "autumn"]?.slice(0, 3) || mainFish.bait.slice(0, 3);
+    const hooks = mainFish.type === "predator" ? "Одинарник/двойник или офсет по приманке; размер под живца и законность способа." : "Тонкий прочный крючок под размер насадки; не увеличивать его без необходимости.";
+    const time = mainFish.active.includes("morning") && mainFish.active.includes("evening") ? "Рассвет и вечерние часы" : mainFish.active.includes("night") ? "Сумерки и ночь" : "Световой день";
+    const waterStatus = selectedWaterObject
+      ? `Выбран объект: ${selectedWaterObject.name}. ${hydrology?.measuredWaterTempC !== null && hydrology?.measuredWaterTempC !== undefined ? `Фактическая температура воды ${hydrology.measuredWaterTempC.toFixed(1)} °C, пост ${hydrology.measuredStation}.` : "Фактическое измерение температуры воды не получено."} Мутность и кислород не выдумываются.${isRiver && hydrology?.dischargeTrend !== "missing" ? ` Модельный речной тренд: ${hydrology?.dischargeTrend === "rising" ? "повышается" : hydrology?.dischargeTrend === "falling" ? "снижается" : "стабильный"}.` : ""}`
+      : "Водоём не выбран: рекомендации рассчитаны по городу, погоде и выбранным параметрам, без выдуманных показателей воды.";
+    return { mainFish, season, groundbait, bait, hooks, time, waterStatus, tackleText: preparation.tackles.join(", ") || "снасть не выбрана" };
+  }, [preparation, activeWeather, selectedWaterObject, hydrology]);
 
   // Handle adding new catch to log
   const handleAddCatch = (e: React.FormEvent) => {
@@ -1071,14 +1137,14 @@ export default function App() {
             Проверенные места
           </button>
           <button
-            onClick={() => handleTabChange("log")}
+            onClick={() => handleTabChange("prep")}
             className={`flex flex-1 items-center justify-center gap-2 rounded-lg py-2.5 px-4 text-xs font-bold transition-all whitespace-nowrap cursor-pointer relative ${
-              activeTab === "log" ? "bg-cyan-500 text-slate-950 shadow-md font-extrabold" : "text-slate-400 hover:text-white"
+              activeTab === "prep" ? "bg-cyan-500 text-slate-950 shadow-md font-extrabold" : "text-slate-400 hover:text-white"
             }`}
           >
             <span className="flex items-center gap-2">
-              <Calendar className="h-4 w-4" />
-              Дневник уловов
+              <CheckCircle2 className="h-4 w-4" />
+              Подготовка+
             </span>
             {catchLog.length > 0 && (
               <span className="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-cyan-400 text-[10px] font-black text-slate-950">
@@ -1151,8 +1217,8 @@ export default function App() {
                         <Waves className="h-8 w-8 text-blue-400" />
                       </div>
                       <div>
-                        <div className="text-xl font-bold text-white">{waterTemp}°C</div>
-                        <div className="text-[10px] text-slate-400">Вода (расчётная)</div>
+                        <div className="text-xl font-bold text-white">{hydrology?.measuredWaterTempC !== null && hydrology?.measuredWaterTempC !== undefined ? `${hydrology.measuredWaterTempC.toFixed(1)}°C` : "—"}</div>
+                        <div className="text-[10px] text-slate-400">Вода {hydrology?.measuredWaterTempC !== null && hydrology?.measuredWaterTempC !== undefined ? "(измерение)" : "нет измерения"}</div>
                       </div>
                     </div>
                   </div>
@@ -1401,8 +1467,8 @@ export default function App() {
                     </section>}
                     <section className="border-t border-slate-700/50 pt-3">
                       <div className="mb-2 text-[10px] font-black uppercase tracking-wide text-cyan-300">{selectedWaterObject?.type === "river" ? "3" : "2"} · Измерения</div>
-                      <p className="text-[11px] text-amber-200">Фактических измерений воды для выбранного объекта нет.</p>
-                      <p className="mt-1 text-[10px] leading-relaxed text-slate-400">Температура воды и мутность не подменяются погодной моделью.</p>
+                      {hydrology?.measuredWaterTempC !== null && hydrology?.measuredWaterTempC !== undefined ? <div className="space-y-1 text-[11px] text-emerald-200"><p>Температура воды: <strong>{hydrology.measuredWaterTempC.toFixed(1)} °C</strong></p>{hydrology.measuredWaterLevelCm !== null && hydrology.measuredWaterLevelCm !== undefined && <p>Уровень воды: <strong>{hydrology.measuredWaterLevelCm} см</strong></p>}<p className="text-[10px] text-slate-400">{hydrology.measuredStation} · {hydrology.measuredAt}</p><a href={hydrology.measuredSourceUrl} target="_blank" rel="noreferrer" className="text-[10px] text-cyan-300 underline">{hydrology.measuredSourceLabel}</a></div> : <p className="text-[11px] text-amber-200">Фактических измерений воды для выбранного объекта нет.</p>}
+                      <p className="mt-1 text-[10px] leading-relaxed text-slate-400">Мутность, кислород и температура не подменяются погодной или речной моделью. Если источник не вернул измерение, оно остаётся неизвестным.</p>
                     </section>
                     <div className="border-t border-slate-700/50 pt-3"><div className="mb-1 text-[10px] font-black uppercase tracking-wide text-cyan-300">Вывод для рыбалки</div><p className="text-[11px] leading-relaxed text-slate-200">{waterConditionsAdvice}</p></div>
                   </div>
@@ -2144,7 +2210,44 @@ export default function App() {
           )}
 
           {/* ========================================================= */}
-          {/* TAB 4: MY CATCH LOG */}
+          {/* TAB 4: PREPARATION+ */}
+          {activeTab === "prep" && (
+            <div className="lg:col-span-12 space-y-6">
+              <div className="rounded-2xl border border-cyan-500/30 bg-gradient-to-r from-cyan-950/50 via-slate-800 to-blue-950/40 p-5 shadow-lg">
+                <h3 className="flex items-center gap-2 text-lg font-black text-white"><CheckCircle2 className="h-5 w-5 text-cyan-300" /> Подготовка+</h3>
+                <p className="mt-1 text-xs leading-relaxed text-slate-300">Отметьте условия конкретного выезда. Рекомендации рассчитываются из плана, выбранной рыбы, снасти, берега или лодки, даты и доступных погодных данных.</p>
+              </div>
+              <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
+                <div className="space-y-4 rounded-2xl border border-slate-700 bg-slate-800 p-5 lg:col-span-2">
+                  <h4 className="text-sm font-black uppercase tracking-wide text-cyan-300">1 · Время рыбалки</h4>
+                  <label className="block text-xs text-slate-300">Дата<input type="date" value={preparation.date} onChange={(e) => setPreparation((p) => ({ ...p, date: e.target.value }))} className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-900 p-2.5 text-white" /></label>
+                  <div className="grid grid-cols-3 gap-1.5">{([{id:"day", label:"Сутки"},{id:"night", label:"Ночь"},{id:"24h", label:"24 часа"}] as const).map((item) => <button key={item.id} onClick={() => setPreparation((p) => ({ ...p, duration: item.id }))} className={`rounded-lg border px-2 py-2 text-[10px] font-bold ${preparation.duration === item.id ? "border-cyan-300 bg-cyan-500 text-slate-950" : "border-slate-700 bg-slate-900 text-slate-300"}`}>{item.label}</button>)}</div>
+                  <label className="block text-xs text-slate-300">Подробности<input value={preparation.details} onChange={(e) => setPreparation((p) => ({ ...p, details: e.target.value }))} placeholder="Время выезда, место, ограничения" className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-900 p-2.5 text-white placeholder:text-slate-500" /></label>
+                  <h4 className="pt-2 text-sm font-black uppercase tracking-wide text-cyan-300">2 · Снасти</h4>
+                  <div className="grid grid-cols-2 gap-2">{["поплавочная", "донка", "фидер", "спиннинг"].map((item) => <button key={item} onClick={() => setPreparation((p) => ({ ...p, tackles: p.tackles.includes(item) ? p.tackles.filter((x) => x !== item) : [...p.tackles, item] }))} className={`rounded-xl border px-2 py-2 text-xs font-bold ${preparation.tackles.includes(item) ? "border-cyan-300 bg-cyan-500/15 text-cyan-200" : "border-slate-700 bg-slate-900 text-slate-400"}`}>{preparation.tackles.includes(item) ? "✓ " : ""}{item}</button>)}</div>
+                  <h4 className="pt-2 text-sm font-black uppercase tracking-wide text-cyan-300">3 · Рыба</h4>
+                  <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto">{fishSpecies.map((fish) => <button key={fish.id} onClick={() => setPreparation((p) => ({ ...p, fish: p.fish.includes(fish.name) ? p.fish.filter((x) => x !== fish.name) : [...p.fish, fish.name] }))} className={`rounded-full border px-2.5 py-1.5 text-[10px] font-bold ${preparation.fish.includes(fish.name) ? "border-amber-300 bg-amber-500/15 text-amber-200" : "border-slate-700 bg-slate-900 text-slate-400"}`}>{fish.name}</button>)}</div>
+                  <h4 className="pt-2 text-sm font-black uppercase tracking-wide text-cyan-300">4 · Лодка или берег</h4>
+                  <div className="grid grid-cols-2 gap-2">{([{id:"bank", label:"Берег"},{id:"boat", label:"Лодка"}] as const).map((item) => <button key={item.id} onClick={() => setPreparation((p) => ({ ...p, access: item.id }))} className={`rounded-xl border px-2 py-2 text-xs font-bold ${preparation.access === item.id ? "border-cyan-300 bg-cyan-500/15 text-cyan-200" : "border-slate-700 bg-slate-900 text-slate-400"}`}>{preparation.access === item.id ? "✓ " : ""}{item.label}</button>)}</div>
+                </div>
+                <div className="space-y-4 rounded-2xl border border-slate-700 bg-slate-800 p-5 lg:col-span-3">
+                  <div><h4 className="text-sm font-black uppercase tracking-wide text-cyan-300">Отчёт подготовки</h4><p className="mt-1 text-[10px] text-slate-400">{selectedLocation.name} · {preparationReport.season} · {preparationReport.tackleText} · {preparation.access === "boat" ? "лодка" : "берег"}</p></div>
+                  <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-xs leading-relaxed text-slate-200"><strong className="text-cyan-300">Время клева:</strong> {preparationReport.time}. Погодный контекст: {activeWeather.temp}°C, ветер {activeWeather.wind} м/с {activeWeather.dir}, давление {activeWeather.pressure} мм.</div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="rounded-xl border border-amber-900/40 bg-amber-950/20 p-3"><h5 className="font-bold text-amber-300">Наживка / приманка</h5><p className="mt-1 text-xs text-slate-200">{preparationReport.bait.join(", ")}</p></div>
+                    <div className="rounded-xl border border-emerald-900/40 bg-emerald-950/20 p-3"><h5 className="font-bold text-emerald-300">Прикормка</h5><p className="mt-1 text-xs text-slate-200">{preparationReport.groundbait}</p></div>
+                    <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-3"><h5 className="font-bold text-cyan-300">Крючки и монтаж</h5><p className="mt-1 text-xs text-slate-200">{preparationReport.hooks}</p></div>
+                    <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-3"><h5 className="font-bold text-cyan-300">Тактика</h5><p className="mt-1 text-xs text-slate-200">{preparation.access === "boat" ? "Проверьте спасжилет, якорь, связь и прогноз ветра. Не выходите при опасной волне." : "Начните с безопасного сектора берега, проверьте дно и дистанцию, держите запасную точку на случай ветра."}</p></div>
+                  </div>
+                  <div className="rounded-xl border border-amber-500/20 bg-amber-950/10 p-3 text-xs leading-relaxed text-amber-100"><strong>Состояние воды:</strong> {preparationReport.waterStatus}</div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-3 text-xs leading-relaxed text-slate-300"><strong className="text-white">Хитрости:</strong> сначала проверьте рельеф и горизонт, затем меняйте подачу; при слабой активности уменьшите насадку и прикормку, а на течении подберите массу оснастки под струю. Проверяйте актуальные правила рыболовства перед выездом.</div>
+                  <p className="text-[10px] leading-relaxed text-slate-500">ИИ-режим не подменяет источник данных. В этой статической версии отчёт рассчитывается локально по проверяемым правилам. Внешняя модель, например Qwen, допустима только через защищённый серверный прокси, а не с ключом в Telegram Mini App.</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Legacy catch log kept in storage for backward compatibility */}
           {/* ========================================================= */}
           {activeTab === "log" && (
             <div className="lg:col-span-12 space-y-6">
@@ -2769,7 +2872,7 @@ export default function App() {
             { id: "forecast", label: "Прогноз", icon: Activity },
             { id: "fish", label: "Рыбы", icon: FishIcon },
             { id: "spots", label: "Места", icon: MapPin },
-            { id: "log", label: "Дневник", icon: Calendar, badge: catchLog.length },
+            { id: "prep", label: "Подготовка+", icon: CheckCircle2 },
             { id: "guide", label: "Инструм.", icon: Calculator },
           ].map((item) => {
             const Icon = item.icon;
@@ -2788,11 +2891,6 @@ export default function App() {
                 <span className={`text-[9px] mt-0.5 font-bold ${isActive ? "text-cyan-400" : ""}`}>
                   {item.label}
                 </span>
-                {item.badge !== undefined && item.badge > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-cyan-500 text-[8px] font-black text-slate-950">
-                    {item.badge > 9 ? "9+" : item.badge}
-                  </span>
-                )}
                 {isActive && (
                   <div className="absolute -bottom-2 w-6 h-0.5 bg-cyan-400 rounded-full" />
                 )}

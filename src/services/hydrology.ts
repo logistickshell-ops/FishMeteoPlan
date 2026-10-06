@@ -19,6 +19,12 @@ export interface HydrologySnapshot {
   returnedCoordinates?: { lat: number; lon: number };
   note: string;
   error?: string;
+  measuredWaterTempC?: number | null;
+  measuredWaterLevelCm?: number | null;
+  measuredStation?: string;
+  measuredAt?: string;
+  measuredSourceUrl?: string;
+  measuredSourceLabel?: string;
 }
 
 const FLOOD_ENDPOINT = "https://flood-api.open-meteo.com/v1/flood";
@@ -43,6 +49,8 @@ export async function fetchHydrologySnapshot(
     source: FLOOD_ENDPOINT,
     sourceLabel: "Open-Meteo Flood / GloFAS",
     requestedCoordinates,
+    measuredWaterTempC: null,
+    measuredWaterLevelCm: null,
   };
 
   // This source describes river discharge only. It must not be shown for a
