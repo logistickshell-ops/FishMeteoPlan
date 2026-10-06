@@ -10,9 +10,11 @@ export interface EngineWeather {
   pressureDelta3h?: number;
   humidity: number;
   wind: number;
+  windGusts?: number;
   dir: string;
   cloudiness: string;
   rain: boolean;
+  precipitation24h?: number;
   cloudCover?: number;
   uvIndex?: number;
   dewPoint?: number;
@@ -89,8 +91,8 @@ const rangeComfort = (value: number, min: number, max: number) => {
 };
 
 const WEIGHTS = {
-  peaceful: { waterTemp: .18, pressure: .14, pressureTrend: .13, wind: .08, light: .08, oxygen: .10, turbidity: .05, waterLevel: .08, habitat: .07, moon: .04, season: .03, prey: .02 },
-  predator: { waterTemp: .17, pressure: .14, pressureTrend: .12, wind: .10, light: .12, oxygen: .05, turbidity: .07, waterLevel: .05, habitat: .07, moon: .05, season: .03, prey: .03 },
+  peaceful: { waterTemp: .18, pressure: .14, pressureTrend: .13, wind: .08, light: .08, oxygen: .10, turbidity: .05, waterLevel: .06, habitat: .05, moon: .03, season: .01, prey: .02, precipitation: .04, humidity: .03 },
+  predator: { waterTemp: .17, pressure: .14, pressureTrend: .12, wind: .10, light: .12, oxygen: .05, turbidity: .07, waterLevel: .04, habitat: .05, moon: .04, season: .01, prey: .01, precipitation: .04, humidity: .04 },
 } as const;
 
 function pressureDelta(weather: EngineWeather) {
@@ -128,11 +130,27 @@ function lightFactor(fish: FishSpecies, weather: EngineWeather) {
 }
 
 function windFactor(fish: FishSpecies, weather: EngineWeather) {
-  if (weather.wind > fish.wind * 1.35) return .10;
-  const speed = weather.wind <= 1 ? .42 : weather.wind <= 4 ? .88 : weather.wind <= fish.wind ? .72 : .38;
+  const operationalWind = Math.max(weather.wind, (weather.windGusts ?? weather.wind) * .72);
+  if (operationalWind > fish.wind * 1.35) return .10;
+  const speed = operationalWind <= 1 ? .42 : operationalWind <= 4 ? .88 : operationalWind <= fish.wind ? .72 : .38;
   const warm = ["Ю", "ЮЗ", "ЮВ"].includes(weather.dir);
   const direction = fish.windPreference === "windward" && warm ? .12 : fish.windPreference === "leeward" && !warm ? .06 : 0;
   return clamp(speed + direction);
+}
+
+function precipitationFactor(weather: EngineWeather) {
+  const rain24h = weather.precipitation24h ?? (weather.rain ? 2 : 0);
+  if (rain24h >= 12) return .25;
+  if (rain24h >= 5) return .50;
+  if (rain24h > 0 || weather.rain) return .68;
+  return .82;
+}
+
+function humidityFactor(humidity: number) {
+  if (!Number.isFinite(humidity)) return .5;
+  if (humidity >= 45 && humidity <= 85) return .82;
+  if (humidity < 25 || humidity > 96) return .42;
+  return .62;
 }
 
 function status(score: number, blocked: boolean): ForecastStatus {
@@ -171,7 +189,9 @@ export function calculateFishForecast(fish: FishSpecies, weather: EngineWeather,
   const measuredWaterTemp = evidence.waterTemp === "measured" ? context.waterTemp : undefined;
   const season = seasonFactor(fish, context.month, measuredWaterTemp);
   const prey = predator ? clamp(.45 + (measuredWaterTemp !== undefined && measuredWaterTemp > 15 && measuredWaterTemp < 25 ? .25 : 0) + (weather.wind > 1 && weather.wind < 6 ? .18 : 0) + (weather.rain ? .05 : 0)) : .55;
-  const factors = { waterTemp, pressure, pressureTrend, wind, light, oxygen, turbidity, waterLevel, habitat, moon, season, prey };
+  const precipitation = precipitationFactor(weather);
+  const humidity = humidityFactor(weather.humidity);
+  const factors = { waterTemp, pressure, pressureTrend, wind, light, oxygen, turbidity, waterLevel, habitat, moon, season, prey, precipitation, humidity };
   const weighted = Object.entries(factors).reduce((sum, [key, value]) => sum + weights[key as keyof typeof weights] * clamp(value), 0);
   const seasonMultiplier = .90 + season * .20;
   const regionalCalibration = context.latitude < 60 ? 1 : .98;
@@ -179,7 +199,7 @@ export function calculateFishForecast(fish: FishSpecies, weather: EngineWeather,
   const heuristicsApplied = buildHeuristics(fish, weather, baseScore);
   const heuristicShift = Math.max(-.12, Math.min(.12, heuristicsApplied.reduce((sum, item) => sum + item.shift, 0)));
   const score = clamp(baseScore + heuristicShift);
-  const weatherFields = [weather.temp, weather.pressure, weather.humidity, weather.wind, weather.cloudiness, context.waterBody, context.month, context.moonPhase];
+  const weatherFields = [weather.temp, weather.pressure, weather.humidity, weather.wind, weather.windGusts, weather.precipitation24h, weather.cloudiness, context.waterBody, context.month, context.moonPhase];
   const weatherCompleteness = weatherFields.filter((value) => value !== undefined && value !== null && value !== "").length / weatherFields.length;
   const evidenceCompleteness = Object.values(evidence).reduce((sum, value) => sum + (value === "measured" ? 1 : value === "modelled" ? .25 : 0), 0) / Object.keys(evidence).length;
   const dataCompleteness = weatherCompleteness * .65 + evidenceCompleteness * .35;
@@ -219,7 +239,7 @@ export function calculateFishForecast(fish: FishSpecies, weather: EngineWeather,
 }
 
 export function validateWeightSums() {
-  return Object.values(WEIGHTS).map((weights) => round(Object.values(weights).reduce((sum, weight) => sum + weight, 0), 6));
+  return Object.values(WEIGHTS).map((weights) => round(Object.values(weights).reduce<number>((sum, weight) => sum + weight, 0), 6));
 }
 
 export const algorithmLegalNotice = "Индекс условий является эвристической модельной оценкой и не является калиброванной вероятностью улова. Он не заменяет официальные правила рыболовства; проверяйте актуальные ограничения региона.";

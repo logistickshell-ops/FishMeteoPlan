@@ -117,7 +117,8 @@ interface CatchEntry {
 
 interface PreparationPlan {
   date: string;
-  duration: "day" | "night" | "24h";
+  departure: "morning" | "day" | "evening" | "night";
+  fishingPeriods: Array<"morning" | "day" | "evening" | "night">;
   details: string;
   tackles: string[];
   fish: string[];
@@ -205,7 +206,8 @@ export default function App() {
 
   const [preparation, setPreparation] = useState<PreparationPlan>({
     date: new Date().toISOString().split("T")[0],
-    duration: "day",
+    departure: "morning",
+    fishingPeriods: ["morning", "day"],
     details: "",
     tackles: ["фидер"],
     fish: ["Лещ"],
@@ -294,7 +296,7 @@ export default function App() {
       setWeatherSnapshots([]);
       setWeatherMode("Сейчас");
       try {
-        const url = `https://api.open-meteo.com/v1/forecast?latitude=${selectedLocation.coords.lat}&longitude=${selectedLocation.coords.lon}&current=temperature_2m,relative_humidity_2m,weather_code,pressure_msl,wind_speed_10m,wind_gusts_10m,wind_direction_10m,cloud_cover,dew_point_2m,uv_index,precipitation&hourly=pressure_msl,precipitation&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum&past_days=1&forecast_days=7&wind_speed_unit=ms&timezone=auto`;
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${selectedLocation.coords.lat}&longitude=${selectedLocation.coords.lon}&current=temperature_2m,relative_humidity_2m,weather_code,pressure_msl,wind_speed_10m,wind_gusts_10m,wind_direction_10m,cloud_cover,dew_point_2m,uv_index,precipitation&hourly=pressure_msl,precipitation&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant&past_days=1&forecast_days=7&wind_speed_unit=ms&timezone=auto`;
         const response = await fetch(url);
         if (!response.ok) throw new Error("Open-Meteo request failed");
         const data = await response.json();
@@ -365,7 +367,10 @@ export default function App() {
           const dayPressure = pressureForDate(date);
           const dayState: WeatherState = {
             ...currentState,
-            temp: dayTemp,
+            wind: Number(Number(daily.wind_speed_10m_max?.[index] ?? currentState.wind).toFixed(1)),
+            windGusts: Number(Number(daily.wind_gusts_10m_max?.[index] ?? currentState.windGusts ?? currentState.wind).toFixed(1)),
+            deg: Number(daily.wind_direction_10m_dominant?.[index] ?? currentState.deg),
+            dir: dirs[Math.round(Number(daily.wind_direction_10m_dominant?.[index] ?? currentState.deg) / 45) % 8],
             pressure: dayPressure.mmhg,
             pressureHpa: Number(dayPressure.hpa.toFixed(1)),
             pressureDelta3h: dayPressure.delta,
@@ -386,6 +391,7 @@ export default function App() {
             minTemp: Math.round(Number(daily.temperature_2m_min?.[index] ?? dayTemp)),
             maxTemp: Math.round(Number(daily.temperature_2m_max?.[index] ?? dayTemp)),
             precipitation: Math.round(Number(daily.precipitation_probability_max?.[index] ?? 0)),
+            precipitation24h: Number(Number(daily.precipitation_sum?.[index] ?? 0).toFixed(1)),
           });
         });
         setWeatherSnapshots(snapshots);
@@ -673,9 +679,11 @@ export default function App() {
       pressureDelta3h: activeWeather.pressureDelta3h,
       humidity: activeWeather.humidity,
       wind: activeWeather.wind,
+      windGusts: activeWeather.windGusts,
       dir: activeWeather.dir,
       cloudiness: activeWeather.cloudiness,
       rain: activeWeather.rain,
+      precipitation24h: activeWeather.precipitation24h,
       cloudCover: activeWeather.cloudCover,
       uvIndex: activeWeather.uvIndex,
       dewPoint: activeWeather.dewPoint,
@@ -725,6 +733,8 @@ export default function App() {
           season: engine.factors.season,
           habitat: engine.factors.habitat,
           precip: activeWeather.rain ? (fish.type === "predator" ? 60 : 35) : 50,
+          precipitation: engine.factors.precipitation,
+          humidity: engine.factors.humidity,
           oxygen: engine.factors.oxygen,
           turbidity: engine.factors.turbidity,
           waterLevel: engine.factors.waterLevel,
@@ -814,9 +824,10 @@ export default function App() {
   const preparationReport = useMemo(() => {
     const targetFish = fishSpecies.filter((fish) => preparation.fish.includes(fish.name));
     const mainFish = targetFish[0] || fishSpecies[0];
+    const planWeather = weatherSnapshots.find((snapshot) => snapshot.date === preparation.date) || activeWeather;
     const month = new Date(`${preparation.date}T12:00:00`).getMonth() + 1;
     const season = month <= 2 || month === 12 ? "зима" : month <= 5 ? "весна" : month <= 8 ? "лето" : "осень";
-    const coldWater = activeWeather.temp < 10 || season === "зима";
+    const coldWater = planWeather.temp < 10 || season === "зима";
     const isRiver = selectedWaterObject?.type === "river";
     const groundbait = mainFish.type === "predator"
       ? "Прикормка не является основной тактикой; ищите кормовую рыбу и меняйте горизонт."
@@ -825,12 +836,15 @@ export default function App() {
         : "Стартовая порция умеренная, затем докорм малыми порциями по реакции рыбы.";
     const bait = mainFish.seasonalBait[season === "зима" ? "winter" : season === "весна" ? "spring" : season === "лето" ? "summer" : "autumn"]?.slice(0, 3) || mainFish.bait.slice(0, 3);
     const hooks = mainFish.type === "predator" ? "Одинарник/двойник или офсет по приманке; размер под живца и законность способа." : "Тонкий прочный крючок под размер насадки; не увеличивать его без необходимости.";
-    const time = mainFish.active.includes("morning") && mainFish.active.includes("evening") ? "Рассвет и вечерние часы" : mainFish.active.includes("night") ? "Сумерки и ночь" : "Световой день";
+    const periodLabels: Record<PreparationPlan["departure"], string> = { morning: "утро", day: "день", evening: "вечер", night: "ночь" };
+    const selectedPeriods = preparation.fishingPeriods.length ? preparation.fishingPeriods.map((period) => periodLabels[period]).join(", ") : "период не выбран";
+    const activeSelectedPeriods = preparation.fishingPeriods.filter((period) => mainFish.active.includes(period));
+    const time = activeSelectedPeriods.length ? `${selectedPeriods}; для ${mainFish.name} подходят: ${activeSelectedPeriods.map((period) => periodLabels[period]).join(", ")}` : `${selectedPeriods}; выбранное время не является типичным окном для ${mainFish.name}`;
     const waterStatus = selectedWaterObject
       ? `Выбран объект: ${selectedWaterObject.name}. ${hydrology?.measuredWaterTempC !== null && hydrology?.measuredWaterTempC !== undefined ? `Фактическая температура воды ${hydrology.measuredWaterTempC.toFixed(1)} °C, пост ${hydrology.measuredStation}.` : "Фактическое измерение температуры воды не получено."} Мутность и кислород не выдумываются.${isRiver && hydrology?.dischargeTrend !== "missing" ? ` Модельный речной тренд: ${hydrology?.dischargeTrend === "rising" ? "повышается" : hydrology?.dischargeTrend === "falling" ? "снижается" : "стабильный"}.` : ""}`
       : "Водоём не выбран: рекомендации рассчитаны по городу, погоде и выбранным параметрам, без выдуманных показателей воды.";
-    return { mainFish, season, groundbait, bait, hooks, time, waterStatus, tackleText: preparation.tackles.join(", ") || "снасть не выбрана" };
-  }, [preparation, activeWeather, selectedWaterObject, hydrology]);
+    return { mainFish, season, groundbait, bait, hooks, time, waterStatus, tackleText: preparation.tackles.join(", ") || "снасть не выбрана", planWeather };
+  }, [preparation, activeWeather, weatherSnapshots, selectedWaterObject, hydrology]);
 
   // Handle adding new catch to log
   const handleAddCatch = (e: React.FormEvent) => {
@@ -1038,7 +1052,7 @@ export default function App() {
       </header>
 
       {/* Main Area */}
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 pb-24 lg:pb-6">
+      <main className="mx-auto max-w-7xl px-3 py-4 pb-24 sm:px-6 sm:py-6 lg:px-8 lg:pb-6">
         
         {/* Geographic / Location Bar */}
         <section className="mb-6 rounded-2xl bg-gradient-to-r from-blue-950 to-slate-900 p-4 shadow-xl border border-blue-900/50 flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -1100,7 +1114,7 @@ export default function App() {
         )}
 
         {!hasLocation && (
-          <section className="mb-6 rounded-2xl border border-dashed border-cyan-500/40 bg-cyan-950/20 p-8 text-center">
+          <section className="mb-6 rounded-2xl border border-dashed border-cyan-500/40 bg-cyan-950/20 p-4 text-center sm:p-8">
             <Search className="mx-auto mb-3 h-10 w-10 text-cyan-400" />
             <h2 className="text-lg font-bold text-white">Найдите город для прогноза</h2>
             <p className="mt-2 text-sm text-slate-300">Выберите город в результатах поиска. После выбора он сохранится в вашем профиле и будет использоваться при следующем запуске.</p>
@@ -2217,11 +2231,12 @@ export default function App() {
                 <h3 className="flex items-center gap-2 text-lg font-black text-white"><CheckCircle2 className="h-5 w-5 text-cyan-300" /> Подготовка+</h3>
                 <p className="mt-1 text-xs leading-relaxed text-slate-300">Отметьте условия конкретного выезда. Рекомендации рассчитываются из плана, выбранной рыбы, снасти, берега или лодки, даты и доступных погодных данных.</p>
               </div>
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
-                <div className="space-y-4 rounded-2xl border border-slate-700 bg-slate-800 p-5 lg:col-span-2">
+              <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-5">
+                <div className="space-y-4 rounded-2xl border border-slate-700 bg-slate-800 p-4 sm:p-5 lg:col-span-2">
                   <h4 className="text-sm font-black uppercase tracking-wide text-cyan-300">1 · Время рыбалки</h4>
-                  <label className="block text-xs text-slate-300">Дата<input type="date" value={preparation.date} onChange={(e) => setPreparation((p) => ({ ...p, date: e.target.value }))} className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-900 p-2.5 text-white" /></label>
-                  <div className="grid grid-cols-3 gap-1.5">{([{id:"day", label:"Сутки"},{id:"night", label:"Ночь"},{id:"24h", label:"24 часа"}] as const).map((item) => <button key={item.id} onClick={() => setPreparation((p) => ({ ...p, duration: item.id }))} className={`rounded-lg border px-2 py-2 text-[10px] font-bold ${preparation.duration === item.id ? "border-cyan-300 bg-cyan-500 text-slate-950" : "border-slate-700 bg-slate-900 text-slate-300"}`}>{item.label}</button>)}</div>
+                  <label className="block text-xs text-slate-300">Дата из прогноза на неделю<select value={preparation.date} onChange={(e) => setPreparation((p) => ({ ...p, date: e.target.value }))} className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-900 p-2.5 text-white">{weatherSnapshots.filter((snapshot, index, list) => list.findIndex((item) => item.date === snapshot.date) === index && snapshot.date).map((snapshot) => <option key={snapshot.date} value={snapshot.date}>{snapshot.label} · {snapshot.date} · {snapshot.minTemp}…{snapshot.maxTemp}°C</option>)}{!weatherSnapshots.length && <option value={preparation.date}>{preparation.date} · прогноз пока не загружен</option>}</select></label>
+                  <div><span className="text-xs text-slate-300">Выезд</span><div className="mt-1 grid grid-cols-2 gap-1.5 sm:grid-cols-4">{([{id:"morning", label:"Утро"},{id:"day", label:"День"},{id:"evening", label:"Вечер"},{id:"night", label:"Ночь"}] as const).map((item) => <button key={item.id} onClick={() => setPreparation((p) => ({ ...p, departure: item.id }))} className={`rounded-lg border px-2 py-2 text-[10px] font-bold ${preparation.departure === item.id ? "border-cyan-300 bg-cyan-500 text-slate-950" : "border-slate-700 bg-slate-900 text-slate-300"}`}>{item.label}</button>)}</div></div>
+                  <div><span className="text-xs text-slate-300">Время рыбалки</span><div className="mt-1 grid grid-cols-2 gap-1.5 sm:grid-cols-4">{([{id:"morning", label:"Утро"},{id:"day", label:"День"},{id:"evening", label:"Вечер"},{id:"night", label:"Ночь"}] as const).map((item) => <button key={item.id} onClick={() => setPreparation((p) => ({ ...p, fishingPeriods: p.fishingPeriods.includes(item.id) ? p.fishingPeriods.filter((period) => period !== item.id) : [...p.fishingPeriods, item.id] }))} className={`rounded-lg border px-2 py-2 text-[10px] font-bold ${preparation.fishingPeriods.includes(item.id) ? "border-amber-300 bg-amber-500/20 text-amber-100" : "border-slate-700 bg-slate-900 text-slate-300"}`}>{preparation.fishingPeriods.includes(item.id) ? "✓ " : ""}{item.label}</button>)}</div></div>
                   <label className="block text-xs text-slate-300">Подробности<input value={preparation.details} onChange={(e) => setPreparation((p) => ({ ...p, details: e.target.value }))} placeholder="Время выезда, место, ограничения" className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-900 p-2.5 text-white placeholder:text-slate-500" /></label>
                   <h4 className="pt-2 text-sm font-black uppercase tracking-wide text-cyan-300">2 · Снасти</h4>
                   <div className="grid grid-cols-2 gap-2">{["поплавочная", "донка", "фидер", "спиннинг"].map((item) => <button key={item} onClick={() => setPreparation((p) => ({ ...p, tackles: p.tackles.includes(item) ? p.tackles.filter((x) => x !== item) : [...p.tackles, item] }))} className={`rounded-xl border px-2 py-2 text-xs font-bold ${preparation.tackles.includes(item) ? "border-cyan-300 bg-cyan-500/15 text-cyan-200" : "border-slate-700 bg-slate-900 text-slate-400"}`}>{preparation.tackles.includes(item) ? "✓ " : ""}{item}</button>)}</div>
@@ -2231,8 +2246,8 @@ export default function App() {
                   <div className="grid grid-cols-2 gap-2">{([{id:"bank", label:"Берег"},{id:"boat", label:"Лодка"}] as const).map((item) => <button key={item.id} onClick={() => setPreparation((p) => ({ ...p, access: item.id }))} className={`rounded-xl border px-2 py-2 text-xs font-bold ${preparation.access === item.id ? "border-cyan-300 bg-cyan-500/15 text-cyan-200" : "border-slate-700 bg-slate-900 text-slate-400"}`}>{preparation.access === item.id ? "✓ " : ""}{item.label}</button>)}</div>
                 </div>
                 <div className="space-y-4 rounded-2xl border border-slate-700 bg-slate-800 p-5 lg:col-span-3">
-                  <div><h4 className="text-sm font-black uppercase tracking-wide text-cyan-300">Отчёт подготовки</h4><p className="mt-1 text-[10px] text-slate-400">{selectedLocation.name} · {preparationReport.season} · {preparationReport.tackleText} · {preparation.access === "boat" ? "лодка" : "берег"}</p></div>
-                  <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-xs leading-relaxed text-slate-200"><strong className="text-cyan-300">Время клева:</strong> {preparationReport.time}. Погодный контекст: {activeWeather.temp}°C, ветер {activeWeather.wind} м/с {activeWeather.dir}, давление {activeWeather.pressure} мм.</div>
+                  <div><h4 className="text-sm font-black uppercase tracking-wide text-cyan-300">Отчёт подготовки</h4><p className="mt-1 text-[10px] text-slate-400">{selectedLocation.name}{selectedWaterObject ? ` · ${selectedWaterObject.name}` : ""} · {preparation.date} · выезд: {preparation.departure} · {preparationReport.tackleText} · {preparation.access === "boat" ? "лодка" : "берег"}</p></div>
+                  <div className="rounded-xl border border-cyan-900/40 bg-cyan-950/20 p-3 text-xs leading-relaxed text-slate-200"><strong className="text-cyan-300">Время клева:</strong> {preparationReport.time}. Погода выбранной даты: {preparationReport.planWeather.temp}°C, ветер {preparationReport.planWeather.wind} м/с {preparationReport.planWeather.dir}, порывы до {preparationReport.planWeather.windGusts ?? "—"} м/с, давление {preparationReport.planWeather.pressure} мм, осадки {preparationReport.planWeather.precipitation24h ?? "—"} мм/24 ч.</div>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="rounded-xl border border-amber-900/40 bg-amber-950/20 p-3"><h5 className="font-bold text-amber-300">Наживка / приманка</h5><p className="mt-1 text-xs text-slate-200">{preparationReport.bait.join(", ")}</p></div>
                     <div className="rounded-xl border border-emerald-900/40 bg-emerald-950/20 p-3"><h5 className="font-bold text-emerald-300">Прикормка</h5><p className="mt-1 text-xs text-slate-200">{preparationReport.groundbait}</p></div>
@@ -2872,7 +2887,7 @@ export default function App() {
             { id: "forecast", label: "Прогноз", icon: Activity },
             { id: "fish", label: "Рыбы", icon: FishIcon },
             { id: "spots", label: "Места", icon: MapPin },
-            { id: "prep", label: "Подготовка+", icon: CheckCircle2 },
+            { id: "prep", label: "Подг.+", icon: CheckCircle2 },
             { id: "guide", label: "Инструм.", icon: Calculator },
           ].map((item) => {
             const Icon = item.icon;
@@ -2881,14 +2896,14 @@ export default function App() {
               <button
                 key={item.id}
                 onClick={() => handleTabChange(item.id)}
-                className={`relative flex flex-col items-center justify-center min-w-[56px] py-1.5 rounded-xl transition-all cursor-pointer ${
+                className={`relative flex min-w-[52px] flex-col items-center justify-center rounded-xl px-1 py-1.5 transition-all cursor-pointer ${
                   isActive
                     ? "text-cyan-400 bg-cyan-500/10"
                     : "text-slate-500 hover:text-slate-300"
                 }`}
               >
                 <Icon className={`h-5 w-5 ${isActive ? "stroke-[2.5]" : "stroke-[2]"}`} />
-                <span className={`text-[9px] mt-0.5 font-bold ${isActive ? "text-cyan-400" : ""}`}>
+                <span className={`mt-0.5 whitespace-nowrap text-[8px] font-bold ${isActive ? "text-cyan-400" : ""}`}>
                   {item.label}
                 </span>
                 {isActive && (

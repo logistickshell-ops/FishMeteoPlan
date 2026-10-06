@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 const source = readFileSync(new URL("../src/algorithm/forecastEngine.ts", import.meta.url), "utf8");
 const clamp = (value, min = 0, max = 1) => Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : 0.5;
 const weights = [
-  [0.18, .14, .13, .08, .08, .10, .05, .08, .07, .04, .03, .02],
-  [.17, .14, .12, .10, .12, .05, .07, .05, .07, .05, .03, .03],
+  [0.18, .14, .13, .08, .08, .10, .05, .06, .05, .03, .01, .02, .04, .03],
+  [.17, .14, .12, .10, .12, .05, .07, .04, .05, .04, .01, .01, .04, .04],
 ];
 
 for (const sum of weights.map((row) => row.reduce((a, b) => a + b, 0))) {
@@ -19,4 +19,5 @@ if (!source.includes("Math.max(-.12, Math.min(.12")) throw new Error("heuristic 
 if (!source.includes("isLegalClosure")) throw new Error("legal gate missing");
 if (!source.includes("confidenceBreakdown")) throw new Error("confidence breakdown missing");
 if (!source.includes("Number.isFinite")) throw new Error("finite fallback missing");
+if (!source.includes("windGusts") || !source.includes("precipitationFactor") || !source.includes("humidityFactor")) throw new Error("expanded weather factors missing");
 console.log("algorithm checks: OK");
